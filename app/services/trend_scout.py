@@ -1,10 +1,11 @@
 """트렌드 스카우트 — 무협 웹툰 트렌드 수집 및 AI 랭킹"""
 
 import os
+import re
 import json
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, List
 
 import httpx
@@ -85,16 +86,24 @@ class TrendScout:
 
 데이터: {json.dumps(clean_data, ensure_ascii=False)}
 
-아래 JSON 배열 형식으로만 응답하세요. 마크다운이나 설명 없이 순수 JSON만:
-[{{"title": "작품명", "score": 95, "reason": "순위 근거", "episode_range": "1~50화", "target_audience": "global"}}]"""
+반드시 아래 JSON 배열 형식으로만 응답하세요. 마크다운 코드블록 없이 순수 JSON만 출력. 5개 항목. reason은 20자 이내로 짧게:
+[{{"title": "작품명", "score": 95, "reason": "짧은근거", "episode_range": "1~50화", "target_audience": "global"}}]"""
 
         try:
-            resp = await self.llm.generate(prompt=prompt, max_tokens=2000, temperature=0.2)
+            resp = await self.llm.generate(prompt=prompt, max_tokens=4096, temperature=0.2)
             await log_llm_cost(resp, action='trend_rank')
 
             text = resp.text.strip()
+
+            # 마크다운 코드블록 제거
             if text.startswith('```'):
                 text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+
+            # JSON 배열만 추출
+            start = text.find('[')
+            end = text.rfind(']')
+            if start != -1 and end != -1:
+                text = text[start:end + 1]
 
             result = json.loads(text)
             if isinstance(result, list) and len(result) > 0:
@@ -108,7 +117,7 @@ class TrendScout:
 
         return self._fallback_rank(raw_data)
 
-    # ══════ 데이터 수집 (YouTube/Naver/Reddit — 변경 없음) ══════
+    # ══════ 데이터 수집 ══════
 
     async def _collect_youtube(self) -> List[dict[str, Any]]:
         if not self.youtube_api_key:
@@ -209,7 +218,7 @@ class TrendScout:
         logger.info(f'Reddit: collected {len(items)} items')
         return items
 
-    # ══════ 캐시 & 유틸 (변경 없음) ══════
+    # ══════ 캐시 & 유틸 ══════
 
     async def _save_cache(self, data: List[dict[str, Any]]) -> None:
         db = await get_db()
@@ -258,7 +267,6 @@ class TrendScout:
 
     @staticmethod
     def _days_ago_iso(days: int) -> str:
-        from datetime import timedelta
         return (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     @staticmethod
@@ -278,14 +286,12 @@ class TrendScout:
 
     @staticmethod
     def _extract_work_title(post_title: str) -> str:
-        import re
         cleaned = re.sub(r'^\[.*?\]\s*', '', post_title)
         cleaned = re.split(r'\s*(?:chapter|ch\.?|ep\.?)\s*\d+', cleaned, flags=re.IGNORECASE)[0]
         return cleaned.strip() or post_title.strip()
 
     @staticmethod
     def _clean_youtube_title(title: str) -> str:
-        import re
         cleaned = re.sub(r'\s*[\|\-–—]\s*(?:recap|리캡|explained|요약).*$', '', title, flags=re.IGNORECASE)
         cleaned = re.sub(r'\s*\(.*?(?:recap|리캡|part|파트).*?\)\s*$', '', cleaned, flags=re.IGNORECASE)
         return cleaned.strip() or title.strip()
