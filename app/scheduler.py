@@ -11,34 +11,19 @@ logger = logging.getLogger(__name__)
 # 수집 주기 (초) — 6시간
 TREND_INTERVAL_SECONDS = 6 * 60 * 60
 
+# GC 방지용 태스크 참조 보관
+_background_tasks: list = []
+
 
 async def start_background_tasks():
     """앱 시작 시 호출: DB 초기화 → 스케줄러 루프 시작"""
     await init_db()
-    await _ensure_trend_tables()
     logger.info('Database initialized — starting background scheduler')
 
-    # 백그라운드 태스크로 실행 (앱 종료 시 자동 정리)
-    asyncio.create_task(_trend_collection_loop())
-
-
-async def _ensure_trend_tables():
-    """트렌드 결과 저장용 테이블 생성"""
-    db = await get_db()
-    try:
-        await db.execute('''CREATE TABLE IF NOT EXISTS trend_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rank INTEGER DEFAULT 0,
-            title TEXT NOT NULL,
-            score INTEGER DEFAULT 0,
-            reason TEXT DEFAULT '',
-            episode_range TEXT DEFAULT '',
-            target_audience TEXT DEFAULT '',
-            collected_at TEXT NOT NULL
-        )''')
-        await db.commit()
-    finally:
-        await db.close()
+    # 백그라운드 태스크로 실행 (참조를 리스트에 저장하여 GC 방지)
+    task = asyncio.create_task(_trend_collection_loop())
+    _background_tasks.append(task)
+    logger.info('Trend collection task registered (GC-safe)')
 
 
 async def _trend_collection_loop():

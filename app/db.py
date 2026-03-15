@@ -1,3 +1,5 @@
+"""데이터베이스 유틸리티 — SQLite 연결 · 초기화"""
+
 import os
 import logging
 import aiosqlite
@@ -17,6 +19,7 @@ async def get_db():
 async def init_db():
     conn = await get_db()
     try:
+        # ── 기존 6개 테이블 ──
         await conn.execute('''CREATE TABLE IF NOT EXISTS api_costs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             service TEXT NOT NULL,
@@ -90,6 +93,28 @@ async def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id)
         )''')
 
+        # ── 신규 2개 테이블: 트렌드 캐시 + 랭킹 결과 ──
+        await conn.execute('''CREATE TABLE IF NOT EXISTS trend_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            trend_score INTEGER DEFAULT 0,
+            source TEXT DEFAULT '',
+            genre TEXT DEFAULT '',
+            meta_json TEXT DEFAULT '{}',
+            collected_at TEXT NOT NULL
+        )''')
+
+        await conn.execute('''CREATE TABLE IF NOT EXISTS trend_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rank INTEGER DEFAULT 0,
+            title TEXT NOT NULL,
+            score INTEGER DEFAULT 0,
+            reason TEXT DEFAULT '',
+            episode_range TEXT DEFAULT '',
+            target_audience TEXT DEFAULT '',
+            collected_at TEXT NOT NULL
+        )''')
+
         # 기본 채널 데이터 시드
         for code, name, tz, hour in [
             ('en', 'Murim Recap EN', 'US/Eastern', 18),
@@ -103,6 +128,6 @@ async def init_db():
                 (code, name, tz, hour))
 
         await conn.commit()
-        logger.info('Database initialized with 6 tables + seed data')
+        logger.info('Database initialized with 8 tables + seed data')
     finally:
         await conn.close()
