@@ -1,13 +1,18 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from nicegui import ui, app
 from app.pages import dashboard, trend_scout, script_factory, media_factory, channel_hub, cost_tracker
 
+
 @ui.page('/')
 async def index():
-    with ui.header().classes('bg-gray-900 text-white'):
+    with ui.header().classes('bg-gray-900 text-white items-center'):
         ui.label('⚔️ 무협 팩토리').classes('text-xl font-bold')
-        with ui.row().classes('ml-auto'):
-            ui.label('v1.0').classes('text-sm text-gray-400')
+        ui.space()
+        ui.label('v1.1').classes('text-sm text-gray-400')
 
     with ui.tabs().classes('w-full') as tabs:
         tab_dash = ui.tab('📊 대시보드')
@@ -31,10 +36,12 @@ async def index():
         with ui.tab_panel(tab_cost):
             await cost_tracker.cost_page()
 
+
 @app.on_startup
 async def startup():
     from app.scheduler import start_background_tasks
     await start_background_tasks()
+
 
 if __name__ == '__main__':
     ui.run(

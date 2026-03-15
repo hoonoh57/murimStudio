@@ -1,7 +1,12 @@
 import asyncio
+import logging
 from app.db import init_db
+
+logger = logging.getLogger(__name__)
+
 
 async def start_background_tasks():
     await init_db()
-    # 스케줄된 백그라운드 작업을 이곳에 추가
+    logger.info('Background tasks started — DB ready')
+    # 향후 주기적 트렌드 수집 등 추가
     await asyncio.sleep(0)

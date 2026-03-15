@@ -4,3 +4,7 @@ app.db
 .env
 venv/
 output/
+*.egg-info/
+dist/
+build/
+.DS_Store
