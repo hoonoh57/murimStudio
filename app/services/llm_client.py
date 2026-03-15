@@ -4,7 +4,7 @@ import asyncio
 import itertools
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -50,7 +50,7 @@ class LLMClient:
         if self._initialized:
             return
         self._initialized = True
-        self._http = httpx.AsyncClient(timeout=60)
+        self._http = httpx.AsyncClient(timeout=120)
 
         # Claude
         self._claude_key = settings.CLAUDE_API_KEY
@@ -95,7 +95,6 @@ class LLMClient:
 
         last_err = None
         for model in GEMINI_MODELS:
-            # 키 5개를 순회하며 시도
             for _ in range(len(self._gemini_keys)):
                 key = await self._next_gemini_key()
                 try:
@@ -110,10 +109,16 @@ class LLMClient:
                         )
                         last_err = e
                         continue
+                    elif status == 400:
+                        logger.warning(
+                            f"[LLM] Gemini {model} 400 Bad Request, 다음 모델 시도"
+                        )
+                        last_err = e
+                        break  # 다음 모델로
                     elif status in (500, 503):
                         logger.warning(f"[LLM] Gemini {model} 서버 오류 {status}")
                         last_err = e
-                        break  # 다음 모델로
+                        break
                     else:
                         raise
                 except Exception as e:
@@ -181,14 +186,8 @@ class LLMClient:
             f"models/{model}:generateContent?key={api_key}"
         )
 
-        contents = []
-        if system:
-            contents.append({"role": "user", "parts": [{"text": system}]})
-            contents.append({
-                "role": "model",
-                "parts": [{"text": "네, 지시사항을 따르겠습니다."}],
-            })
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        # 사용자 메시지만 contents에 넣기
+        contents = [{"role": "user", "parts": [{"text": prompt}]}]
 
         body = {
             "contents": contents,
@@ -197,6 +196,12 @@ class LLMClient:
                 "temperature": temperature,
             },
         }
+
+        # system prompt는 systemInstruction 필드로 전달
+        if system:
+            body["systemInstruction"] = {
+                "parts": [{"text": system}]
+            }
 
         resp = await self._http.post(url, json=body)
         resp.raise_for_status()
@@ -220,7 +225,8 @@ class LLMClient:
 # 싱글턴 접근
 llm_client = LLMClient()
 
-# ── 헬퍼 함수 (다른 모듈에서 import용) ──
+
+# ── 헬퍼 함수 ──
 def get_llm_client() -> LLMClient:
     """싱글턴 LLMClient 인스턴스 반환"""
     return llm_client
