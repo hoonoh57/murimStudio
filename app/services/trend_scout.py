@@ -3,6 +3,8 @@ import json
 import asyncio
 from typing import Any, List
 
+from app.services.cost_service import CostTracker
+
 class TrendScout:
     def __init__(self):
         api_key = os.getenv('CLAUDE_API_KEY')
@@ -54,6 +56,21 @@ JSON 배열로만 응답 (마크다운 없이):
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],
             )
+
+            # 비용 로그 기록: Claude API 토큰 사용량 기반
+            usage = None
+            if hasattr(response, 'usage'):
+                usage = response.usage
+            elif isinstance(response, dict):
+                usage = response.get('usage')
+
+            if usage:
+                input_tokens = int(getattr(usage, 'input_tokens', usage.get('input_tokens', 0))) if usage else 0
+                output_tokens = int(getattr(usage, 'output_tokens', usage.get('output_tokens', 0))) if usage else 0
+                cost = (input_tokens * 1.0 / 1_000_000) + (output_tokens * 5.0 / 1_000_000)
+                tracker = CostTracker()
+                await tracker.log_cost('claude', 'trend_rank', input_tokens + output_tokens, cost)
+
             text = response.content[0].text
             result = json.loads(text.strip())
             if isinstance(result, list):
