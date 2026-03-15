@@ -5,3 +5,4 @@ httpx>=0.28
 aiosqlite
 python-dotenv
 anthropic
+google-genai>=1.0
