@@ -1,14 +1,20 @@
+"""스크립트 공장 UI — 생성 + 번역 + 목록 관리"""
+
 from nicegui import ui
 from app.services.script_factory import ScriptFactory
 
 
 async def script_page():
     ui.label('✍️ 스크립트 공장').classes('text-xl font-bold')
-    ui.label('Claude Haiku 4.5 기반 무협 리캡 대본 생성').classes('text-sm text-gray-500 mt-1')
+    ui.label('Claude Haiku 4.5 기반 무협 리캡 대본 생성 · 다국어 번역').classes(
+        'text-sm text-gray-500 mt-1'
+    )
 
     factory = ScriptFactory()
 
-    # ─── 생성 폼 ───
+    # ══════════════════════════════════════
+    #  생성 폼
+    # ══════════════════════════════════════
     with ui.card().classes('w-full mt-4'):
         ui.label('새 스크립트 생성').classes('font-bold')
 
@@ -29,19 +35,51 @@ async def script_page():
                 label='언어',
             ).classes('w-40')
 
-    # ─── 스크립트 목록 ───
+    # ══════════════════════════════════════
+    #  번역 폼
+    # ══════════════════════════════════════
+    with ui.card().classes('w-full mt-4'):
+        ui.label('스크립트 번역').classes('font-bold')
+        ui.label('기존 스크립트를 선택한 후, 번역할 언어를 지정하세요.').classes(
+            'text-sm text-gray-500'
+        )
+
+        with ui.row().classes('w-full gap-4 items-end'):
+            translate_id_input = ui.number(
+                '스크립트 ID', value=0, min=0, format='%d'
+            ).classes('w-40')
+
+            translate_lang_select = ui.select(
+                {
+                    'en': 'English',
+                    'ko': '한국어',
+                    'id': 'Bahasa Indonesia',
+                    'th': 'ภาษาไทย',
+                },
+                value=['en'],
+                multiple=True,
+                label='번역 대상 언어 (복수 선택)',
+            ).classes('flex-1')
+
+    # ══════════════════════════════════════
+    #  스크립트 목록
+    # ══════════════════════════════════════
+    ui.label('스크립트 목록').classes('text-lg font-bold mt-6 mb-2')
+
     script_table = ui.table(
         columns=[
             {'field': 'id', 'label': 'ID', 'sortable': True},
-            {'field': 'project_title', 'label': '작품명'},
-            {'field': 'language', 'label': '언어'},
-            {'field': 'status', 'label': '상태'},
+            {'field': 'project_title', 'label': '작품명', 'sortable': True},
+            {'field': 'language', 'label': '언어', 'sortable': True},
+            {'field': 'status', 'label': '상태', 'sortable': True},
             {'field': 'cost_usd', 'label': '비용'},
-            {'field': 'created_at', 'label': '생성일'},
+            {'field': 'created_at', 'label': '생성일', 'sortable': True},
             {'field': 'snippet', 'label': '미리보기'},
         ],
         rows=[],
-    ).classes('w-full mt-4')
+    ).classes('w-full')
+
+    status_label = ui.label('').classes('text-sm text-gray-500 mt-2')
 
     async def reload_scripts():
         scripts = await factory.list_scripts()
@@ -57,6 +95,7 @@ async def script_page():
             }
             for s in scripts
         ]
+        status_label.text = f'총 {len(scripts)}개 스크립트'
 
     async def create_script():
         ui.notify('스크립트 생성 중… (Claude API 호출)', color='blue')
@@ -72,10 +111,53 @@ async def script_page():
         if result.get('status') == 'error':
             ui.notify('스크립트 생성 실패 — 로그를 확인하세요', color='red')
         else:
-            ui.notify(f'스크립트 생성 완료 (${result.get("cost_usd", 0):.4f})', color='green')
+            cost = result.get('cost_usd', 0)
+            ui.notify(f'스크립트 생성 완료 (${cost:.4f})', color='green')
 
-    with ui.row().classes('gap-2 mt-2'):
+    async def translate_scripts():
+        script_id = int(translate_id_input.value)
+        target_langs = translate_lang_select.value
+
+        if script_id <= 0:
+            ui.notify('유효한 스크립트 ID를 입력하세요.', color='orange')
+            return
+        if not target_langs:
+            ui.notify('번역할 언어를 1개 이상 선택하세요.', color='orange')
+            return
+
+        ui.notify(
+            f'스크립트 #{script_id} → {", ".join(target_langs)} 번역 중…',
+            color='blue',
+        )
+
+        results = await factory.translate_script(
+            script_id=script_id,
+            target_languages=target_langs,
+        )
+
+        if not results:
+            ui.notify('스크립트를 찾을 수 없습니다. ID를 확인하세요.', color='red')
+            return
+
+        total_cost = sum(r.get('cost_usd', 0) for r in results)
+        errors = [r for r in results if r.get('status') == 'error']
+
+        await reload_scripts()
+
+        if errors:
+            ui.notify(
+                f'{len(results) - len(errors)}개 완료, {len(errors)}개 실패 (${total_cost:.4f})',
+                color='orange',
+            )
+        else:
+            ui.notify(
+                f'{len(results)}개 언어 번역 완료 (${total_cost:.4f})',
+                color='green',
+            )
+
+    with ui.row().classes('gap-2 mt-3'):
         ui.button('🤖 AI 스크립트 생성', on_click=create_script).props('color=primary')
+        ui.button('🌐 번역 실행', on_click=translate_scripts).props('color=secondary')
         ui.button('🔄 목록 새로고침', on_click=reload_scripts)
 
     await reload_scripts()
