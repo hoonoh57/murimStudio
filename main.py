@@ -1,3 +1,4 @@
+import os
 from nicegui import ui
 from app.pages import dashboard, trend_scout, script_factory, media_factory, channel_hub, cost_tracker
 
@@ -31,10 +32,11 @@ async def index():
             await cost_tracker.cost_page()
 
 if __name__ == '__main__':
-    import asyncio
     from app.scheduler import start_background_tasks
 
-    asyncio.run(start_background_tasks())
+    @ui.on_startup
+    async def startup():
+        await start_background_tasks()
 
     ui.run(
         title='무협 팩토리',
@@ -42,5 +44,5 @@ if __name__ == '__main__':
         favicon='⚔️',
         dark=True,
         reload=False,
-        storage_secret='your-secret-key',
+        storage_secret=os.getenv('STORAGE_SECRET', 'change-me'),
     )
