@@ -1,5 +1,5 @@
 import os
-from nicegui import ui
+from nicegui import ui, app
 from app.pages import dashboard, trend_scout, script_factory, media_factory, channel_hub, cost_tracker
 
 @ui.page('/')
@@ -31,13 +31,12 @@ async def index():
         with ui.tab_panel(tab_cost):
             await cost_tracker.cost_page()
 
-if __name__ == '__main__':
+@app.on_startup
+async def startup():
     from app.scheduler import start_background_tasks
+    await start_background_tasks()
 
-    @ui.on_startup
-    async def startup():
-        await start_background_tasks()
-
+if __name__ == '__main__':
     ui.run(
         title='무협 팩토리',
         port=8080,
