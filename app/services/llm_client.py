@@ -219,3 +219,13 @@ class LLMClient:
 
 # 싱글턴 접근
 llm_client = LLMClient()
+
+# ── 헬퍼 함수 (다른 모듈에서 import용) ──
+def get_llm_client() -> LLMClient:
+    """싱글턴 LLMClient 인스턴스 반환"""
+    return llm_client
+
+
+def has_llm_client() -> bool:
+    """사용 가능한 AI API 키가 하나라도 있는지 확인"""
+    return bool(settings.CLAUDE_API_KEY or settings.GEMINI_API_KEYS)
