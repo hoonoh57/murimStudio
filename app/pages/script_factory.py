@@ -6,7 +6,7 @@ from app.services.script_factory import ScriptFactory
 
 async def script_page():
     ui.label('✍️ 스크립트 공장').classes('text-xl font-bold')
-    ui.label('Claude Haiku 4.5 기반 무협 리캡 대본 생성 · 다국어 번역').classes(
+    ui.label('Gemini AI 기반 무협 리캡 대본 생성 · 다국어 번역').classes(
         'text-sm text-gray-500 mt-1'
     )
 
@@ -62,43 +62,57 @@ async def script_page():
             ).classes('flex-1')
 
     # ══════════════════════════════════════
-    #  스크립트 목록
+    #  스크립트 목록 (클릭 가능)
     # ══════════════════════════════════════
     ui.label('스크립트 목록').classes('text-lg font-bold mt-6 mb-2')
+    ui.label('💡 ID를 클릭하면 전체 내용을 보고 편집할 수 있습니다').classes('text-xs text-gray-500 mb-1')
 
-    script_table = ui.table(
-        columns=[
-            {'field': 'id', 'label': 'ID', 'sortable': True},
-            {'field': 'project_title', 'label': '작품명', 'sortable': True},
-            {'field': 'language', 'label': '언어', 'sortable': True},
-            {'field': 'status', 'label': '상태', 'sortable': True},
-            {'field': 'cost_usd', 'label': '비용'},
-            {'field': 'created_at', 'label': '생성일', 'sortable': True},
-            {'field': 'snippet', 'label': '미리보기'},
-        ],
-        rows=[],
-    ).classes('w-full')
+    script_container = ui.column().classes('w-full')
 
     status_label = ui.label('').classes('text-sm text-gray-500 mt-2')
 
+    def build_script_table(scripts):
+        """스크립트 목록을 클릭 가능한 테이블로 렌더링"""
+        script_container.clear()
+        with script_container:
+            with ui.element('table').classes('w-full'):
+                with ui.element('thead'):
+                    with ui.element('tr').classes('text-left text-gray-400 text-sm'):
+                        for col in ['ID', '작품명', '언어', '상태', '비용', '생성일', '미리보기']:
+                            with ui.element('th').classes('p-2'):
+                                ui.label(col)
+                with ui.element('tbody'):
+                    for s in scripts:
+                        sid = s.get('id', 0)
+                        with ui.element('tr').classes('border-t border-gray-700 hover:bg-gray-800'):
+                            with ui.element('td').classes('p-2'):
+                                ui.link(
+                                    f'#{sid}',
+                                    f'/script/{sid}',
+                                ).classes('text-blue-400 hover:text-blue-300 font-bold no-underline')
+                            with ui.element('td').classes('p-2'):
+                                ui.label(s.get('project_title', ''))
+                            with ui.element('td').classes('p-2'):
+                                ui.label(s.get('language', ''))
+                            with ui.element('td').classes('p-2'):
+                                status = s.get('status', '')
+                                color = 'text-green-400' if status == 'generated' else 'text-red-400'
+                                ui.label(status).classes(color)
+                            with ui.element('td').classes('p-2'):
+                                ui.label(f"${s.get('cost_usd', 0):.4f}")
+                            with ui.element('td').classes('p-2'):
+                                ui.label((s.get('created_at', '') or '')[:19]).classes('text-sm')
+                            with ui.element('td').classes('p-2 max-w-xs truncate'):
+                                snippet = (s.get('snippet', '') or '').replace('\n', ' ')[:100]
+                                ui.label(snippet).classes('text-sm text-gray-400')
+
     async def reload_scripts():
         scripts = await factory.list_scripts()
-        script_table.rows = [
-            {
-                'id': s.get('id'),
-                'project_title': s.get('project_title', ''),
-                'language': s.get('language', ''),
-                'status': s.get('status', ''),
-                'cost_usd': f"${s.get('cost_usd', 0):.4f}",
-                'created_at': (s.get('created_at', '') or '')[:19],
-                'snippet': (s.get('snippet', '') or '').replace('\n', ' ')[:120],
-            }
-            for s in scripts
-        ]
+        build_script_table(scripts)
         status_label.text = f'총 {len(scripts)}개 스크립트'
 
     async def create_script():
-        ui.notify('스크립트 생성 중… (Claude API 호출)', color='blue')
+        ui.notify('스크립트 생성 중… (AI API 호출)', color='blue')
         result = await factory.generate_script(
             title=title_input.value,
             episodes=episodes_input.value,

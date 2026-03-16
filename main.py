@@ -6,6 +6,7 @@ load_dotenv()
 from nicegui import ui, app
 from app.pages import dashboard, trend_scout, script_factory, media_factory, channel_hub, cost_tracker
 from app.pages import trend_detail  # ← 이 줄 추가
+from app.pages import script_detail  # 스크립트 상세 ← 추가
 
 @ui.page('/')
 async def index():
