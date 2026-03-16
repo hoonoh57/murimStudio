@@ -74,8 +74,9 @@ class ScriptFactory:
                 if ref_data["episode_info"]:
                     parts.append(f"\n=== 해당 회차 정보 ({episodes}) ===")
                     parts.append(ref_data["episode_info"][:2000])
-                parts.append("\n위 참고 자료의 실제 캐릭터명·사건·줄거리를 정확히 반영하세요.")
-                parts.append("참고 자료에 없는 허구의 인물·기술명·사건을 만들지 마세요.")
+                parts.append(f"\n위 참고 자료의 실제 캐릭터명·사건·줄거리를 정확히 반영하세요.")
+                parts.append(f"참고 자료에 없는 허구의 인물·기술명·사건을 만들지 마세요.")
+                parts.append(f"⚠ 반드시 {episodes} 범위의 내용만 다루세요. 이후 회차 내용은 절대 포함하지 마세요.")
                 reference_block = "\n".join(parts)
                 logger.info(f'[ScriptFactory] 레퍼런스 {len(ref_data["sources"])}개 소스 수집 완료 ({len(reference_block)}자)')
         except Exception as e:
