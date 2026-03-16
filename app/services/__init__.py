@@ -5,6 +5,7 @@ from app.services.trend_scout import TrendScout
 from app.services.script_factory import ScriptFactory
 from app.services.media_service import MediaService
 from app.services.channel_service import ChannelService
+from app.services.reference_collector import ReferenceCollector
 
 __all__ = [
     'log_llm_cost',
