@@ -5,20 +5,23 @@ load_dotenv()
 
 from nicegui import ui, app
 from app.pages import dashboard, trend_scout, script_factory, media_factory, channel_hub, cost_tracker
-from app.pages import trend_detail  # ← 이 줄 추가
-from app.pages import script_detail  # 스크립트 상세 ← 추가
+from app.pages import trend_detail
+from app.pages import script_detail
+from app.pages import tts_test
+
 
 @ui.page('/')
 async def index():
     with ui.header().classes('bg-gray-900 text-white items-center'):
         ui.label('⚔️ 무협 팩토리').classes('text-xl font-bold')
         ui.space()
-        ui.label('v1.1').classes('text-sm text-gray-400')
+        ui.label('v1.2').classes('text-sm text-gray-400')
 
     with ui.tabs().classes('w-full') as tabs:
         tab_dash = ui.tab('📊 대시보드')
         tab_trend = ui.tab('🔍 트렌드')
         tab_script = ui.tab('✍️ 스크립트')
+        tab_tts = ui.tab('🔊 TTS')
         tab_media = ui.tab('🎨 미디어')
         tab_channel = ui.tab('📺 채널')
         tab_cost = ui.tab('💰 비용')
@@ -30,6 +33,8 @@ async def index():
             await trend_scout.trend_page()
         with ui.tab_panel(tab_script):
             await script_factory.script_page()
+        with ui.tab_panel(tab_tts):
+            tts_test.create()
         with ui.tab_panel(tab_media):
             await media_factory.media_page()
         with ui.tab_panel(tab_channel):
