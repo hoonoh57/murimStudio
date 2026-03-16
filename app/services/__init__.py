@@ -6,6 +6,7 @@ from app.services.script_factory import ScriptFactory
 from app.services.media_service import MediaService
 from app.services.channel_service import ChannelService
 from app.services.reference_collector import ReferenceCollector
+from app.services.image_generator import ImageGenerator          # ← 추가
 
 __all__ = [
     'log_llm_cost',
@@ -17,4 +18,6 @@ __all__ = [
     'ScriptFactory',
     'MediaService',
     'ChannelService',
+    'ReferenceCollector',      # ← 누락되어 있던 것 추가
+    'ImageGenerator',          # ← 추가
 ]
