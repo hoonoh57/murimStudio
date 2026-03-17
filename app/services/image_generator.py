@@ -195,6 +195,18 @@ class ImageGenerator:
                     "prompt": prompt,
                 })
 
+        if not results:
+            # 명시 태그가 없을 경우 스크립트 본문을 단일 프롬프트로 자동 생성
+            text = script_text.strip()
+            if text:
+                text = re.sub(r'\s+', ' ', text)
+                text = text[:800].strip()
+                if text:
+                    results.append({
+                        "scene_id": "scene_00",
+                        "prompt": text,
+                    })
+
         logger.info(f"📝 {len(results)}개 이미지 프롬프트 추출")
         return results
 

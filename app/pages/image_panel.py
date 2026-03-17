@@ -1,9 +1,5 @@
 """
 이미지 생성 UI 패널 – NiceGUI
-- 스크립트에서 자동 프롬프트 추출
-- 개별/일괄 이미지 생성
-- 실시간 진행 상황 표시
-- 생성된 이미지 미리보기
 """
 
 import asyncio
@@ -12,7 +8,7 @@ import logging
 from nicegui import ui
 
 from app.services.image_generator import ImageGenerator
-from app.services.db import get_db
+from app.db import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +18,8 @@ generator = ImageGenerator()
 def create():
     """이미지 생성 탭 패널"""
 
-    # ── 상태 변수 ───────────────────────────────
     state = {"prompts": [], "results": [], "generating": False}
 
-    # ── 헤더 ────────────────────────────────────
     ui.label("🎨 AI 이미지 생성").classes("text-2xl font-bold mb-2")
     ui.label(
         "Pollinations.ai (FLUX 모델) – 무료, API 키 불필요"
@@ -46,16 +40,25 @@ def create():
         ).classes("w-full").props("rows=8")
 
         async def load_scripts():
-            """DB에서 스크립트 목록 로드"""
+            """DB에서 스크립트 목록 로드 (projects JOIN scripts)"""
             db = await get_db()
             rows = await db.execute(
-                "SELECT id, title, lang, substr(content, 1, 80) as preview "
-                "FROM scripts ORDER BY id DESC LIMIT 20"
+                """
+                SELECT s.id, 
+                       COALESCE(p.title, '제목없음') as title,
+                       s.language, 
+                       substr(s.content, 1, 80) as preview
+                FROM scripts s
+                LEFT JOIN projects p ON s.project_id = p.id
+                WHERE s.content IS NOT NULL AND s.content != ''
+                ORDER BY s.id DESC 
+                LIMIT 20
+                """
             )
             scripts = await rows.fetchall()
             options = {}
             for s in scripts:
-                label = f"[ID:{s[0]}] {s[1] or '제목없음'} ({s[2]}) – {s[3]}..."
+                label = f"[ID:{s[0]}] {s[1]} ({s[2]}) – {s[3]}..."
                 options[s[0]] = label
             script_select.options = options
             script_select.update()
@@ -85,30 +88,17 @@ def create():
 
         prompt_container = ui.column().classes("w-full gap-2")
 
-        def extract_prompts():
-            text = script_text_area.value or ""
-            prompts = generator.extract_prompts(text)
-            state["prompts"] = prompts
+        def render_prompts(prompts):
             prompt_container.clear()
-
             if not prompts:
-                with prompt_container:
-                    ui.label("⚠️ [이미지 프롬프트] 태그를 찾을 수 없습니다").classes(
-                        "text-yellow-400"
-                    )
+                ui.label("⚠️ [이미지 프롬프트] 태그를 찾을 수 없습니다. 전체 스크립트를 기반으로 자동 생성하려면 아래 버튼을 사용하세요.").classes("text-yellow-400")
                 return
 
-            with prompt_container:
-                for i, p in enumerate(prompts):
+            for i, p in enumerate(prompts):
+                with prompt_container:
                     with ui.card().classes("w-full p-3 bg-gray-800"):
-                        ui.label(f"🎬 {p['scene_id']}").classes(
-                            "font-semibold text-blue-300"
-                        )
-                        # 편집 가능한 텍스트 입력
-                        inp = ui.textarea(value=p["prompt"]).classes("w-full").props(
-                            "rows=3 dense"
-                        )
-                        # 클로저에서 인덱스 캡처
+                        ui.label(f"🎬 {p['scene_id']}").classes("font-semibold text-blue-300")
+                        inp = ui.textarea(value=p["prompt"]).classes("w-full").props("rows=3 dense")
                         idx = i
 
                         def update_prompt(e, _idx=idx):
@@ -116,12 +106,23 @@ def create():
                                 state["prompts"][_idx]["prompt"] = e.value
 
                         inp.on("update:model-value", update_prompt)
+            ui.label(f"✅ {len(prompts)}개 프롬프트 추출됨").classes("text-green-400 mt-2")
 
-                ui.label(f"✅ {len(prompts)}개 프롬프트 추출됨").classes(
-                    "text-green-400 mt-2"
-                )
+        def extract_prompts():
+            text = script_text_area.value or ""
+            prompts = generator.extract_prompts(text)
+            state["prompts"] = prompts
+            render_prompts(prompts)
 
-        ui.button("🔍 프롬프트 추출", on_click=extract_prompts).props("color=primary")
+        async def auto_extract():
+            text = script_text_area.value or ""
+            prompts = generator.extract_prompts(text)
+            state["prompts"] = prompts
+            render_prompts(prompts)
+
+        with ui.row().classes("gap-2 mt-2"):
+            ui.button("🔍 프롬프트 추출", on_click=extract_prompts).props("color=primary")
+            ui.button("🤖 자동 프롬프트 생성", on_click=auto_extract).props("outline color=secondary")
 
     # ── 생성 설정 & 실행 ──────────────────────────
     with ui.card().classes("w-full mb-4"):
@@ -146,11 +147,9 @@ def create():
         )
         progress_bar.visible = False
 
-        # ── 결과 표시 영역 ─────────────────────────
         result_container = ui.column().classes("w-full gap-3 mt-4")
 
         async def generate_all():
-            """전체 이미지 일괄 생성"""
             if state["generating"]:
                 ui.notify("이미 생성 중입니다", type="warning")
                 return
@@ -170,7 +169,7 @@ def create():
                     progress_label.text = (
                         f"🎨 생성 중... [{i+1}/{total}] {item['scene_id']}"
                     )
-                    await asyncio.sleep(0.1)  # UI 업데이트 허용
+                    await asyncio.sleep(0.1)
 
                     seed = (
                         int(seed_input.value) + i
@@ -186,7 +185,6 @@ def create():
                     )
                     state["results"].append(result)
 
-                    # 결과를 즉시 표시
                     with result_container:
                         with ui.card().classes(
                             "w-full p-3 "
@@ -214,7 +212,6 @@ def create():
                                         "text-xs text-gray-500"
                                     )
 
-                # 완료
                 success_count = sum(1 for r in state["results"] if r["success"])
                 progress_bar.value = 1.0
                 progress_label.text = (
@@ -231,27 +228,6 @@ def create():
                 ui.notify(f"생성 오류: {e}", type="negative")
             finally:
                 state["generating"] = False
-
-        async def generate_single(index: int):
-            """개별 이미지 1장 생성"""
-            if index >= len(state["prompts"]):
-                return
-            item = state["prompts"][index]
-            seed = (
-                int(seed_input.value) + index
-                if seed_input.value is not None
-                else None
-            )
-            result = await generator.generate(
-                item["prompt"],
-                scene_id=item["scene_id"],
-                model=model_select.value,
-                seed=seed,
-            )
-            if result["success"]:
-                ui.notify(f"✅ {item['scene_id']} 생성 완료!", type="positive")
-            else:
-                ui.notify(f"❌ {item['scene_id']} 실패", type="negative")
 
         with ui.row().classes("gap-2 mt-3"):
             ui.button(
@@ -305,5 +281,5 @@ def create():
 
         ui.button("🎨 이미지 생성", on_click=generate_custom).props("color=primary")
 
-    # 페이지 로드 시 스크립트 목록 불러오기
+    # 페이지 로드 시 스크립트 목록 자동 로드
     asyncio.ensure_future(load_scripts())
