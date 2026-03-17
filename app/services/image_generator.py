@@ -1,8 +1,5 @@
 """
-이미지 생성 서비스 – Pollinations.ai (무료, API키 불필요)
-- image.pollinations.ai  레거시 엔드포인트 사용
-- FLUX 모델 기본 (고품질)
-- 16:9 비율 (1920x1080) – YouTube 영상용
+이미지 생성 서비스 – Pollinations.ai (gen.pollinations.ai + API Key)
 """
 
 import asyncio
@@ -22,21 +19,23 @@ logger = logging.getLogger(__name__)
 OUTPUT_DIR = Path("static/images")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-BASE_URL = "https://image.pollinations.ai/prompt"
+API_KEY = os.getenv("POLLINATIONS_API_KEY", "")
+BASE_URL = "https://gen.pollinations.ai/image"
 DEFAULT_MODEL = "flux"
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
-REQUEST_TIMEOUT = 120          # 이미지 생성 최대 대기
+REQUEST_TIMEOUT = 120
 RETRY_COUNT = 3
-RETRY_DELAY = 5                # 재시도 간격(초)
-RATE_LIMIT_DELAY = 16          # Anonymous tier: 15초당 1회 → 16초 간격
+RETRY_DELAY = 5
+RATE_LIMIT_DELAY = 6           # Spore 티어: 5초+ 간격
 
-# 무협 스타일 공통 접두어 (프롬프트 품질 향상)
 STYLE_PREFIX = (
     "highly detailed digital painting, cinematic lighting, "
     "ancient Chinese martial arts, wuxia style, dramatic atmosphere, "
     "8k resolution, trending on artstation"
 )
+
+MAX_PROMPT_LENGTH = 800
 
 
 class ImageGenerator:
@@ -46,13 +45,20 @@ class ImageGenerator:
         self._last_request_time = 0.0
         self._lock = asyncio.Lock()
         self._client: httpx.AsyncClient | None = None
+        if API_KEY:
+            logger.info(f"✅ Pollinations API 키 설정됨 ({API_KEY[:8]}...)")
+        else:
+            logger.warning("⚠️ POLLINATIONS_API_KEY 미설정 – .env에 추가하세요")
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
+            headers = {"User-Agent": "MurimStudio/1.3"}
+            if API_KEY:
+                headers["Authorization"] = f"Bearer {API_KEY}"
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(REQUEST_TIMEOUT),
                 follow_redirects=True,
-                headers={"User-Agent": "MurimStudio/1.2"}
+                headers=headers,
             )
         return self._client
 
@@ -60,7 +66,6 @@ class ImageGenerator:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    # ── 핵심: 단일 이미지 생성 ──────────────────────────
     async def generate(
         self,
         prompt: str,
@@ -73,14 +78,9 @@ class ImageGenerator:
         enhance: bool = True,
         add_style: bool = True,
     ) -> dict:
-        """
-        프롬프트로 이미지를 생성하고 로컬에 저장.
-        Returns: {"success": bool, "path": str, "url": str, "prompt": str, "elapsed": float}
-        """
-        # 스타일 접두어 추가
+        prompt = prompt[:MAX_PROMPT_LENGTH].strip()
         full_prompt = f"{STYLE_PREFIX}, {prompt}" if add_style else prompt
 
-        # URL 구성
         encoded = quote(full_prompt)
         params = {
             "model": model,
@@ -91,16 +91,24 @@ class ImageGenerator:
         }
         if seed is not None:
             params["seed"] = seed
+        if API_KEY:
+            params["key"] = API_KEY
 
         param_str = "&".join(f"{k}={v}" for k, v in params.items())
         url = f"{BASE_URL}/{encoded}?{param_str}"
 
-        # 파일명 생성
+        # URL 길이 체크
+        if len(url) > 2048:
+            logger.warning(f"⚠️ URL 너무 김 ({len(url)}자), 프롬프트 축소")
+            short_prompt = prompt[:400].strip()
+            full_prompt = f"{STYLE_PREFIX}, {short_prompt}" if add_style else short_prompt
+            encoded = quote(full_prompt)
+            url = f"{BASE_URL}/{encoded}?{param_str}"
+
         prompt_hash = hashlib.md5(full_prompt.encode()).hexdigest()[:8]
         filename = f"{scene_id}_{prompt_hash}.jpg"
         filepath = OUTPUT_DIR / filename
 
-        # 이미 존재하면 스킵
         if filepath.exists() and filepath.stat().st_size > 10_000:
             logger.info(f"⏩ 캐시 사용: {filepath}")
             return {
@@ -112,7 +120,6 @@ class ImageGenerator:
                 "cached": True,
             }
 
-        # Rate limit 준수
         async with self._lock:
             elapsed_since_last = time.time() - self._last_request_time
             if elapsed_since_last < RATE_LIMIT_DELAY:
@@ -146,9 +153,10 @@ class ImageGenerator:
                             "cached": False,
                         }
                     else:
+                        body = resp.text[:200]
                         logger.warning(
                             f"⚠️ 응답 이상: status={resp.status_code}, "
-                            f"size={len(resp.content)}"
+                            f"size={len(resp.content)}, body={body}"
                         )
                 except httpx.TimeoutException:
                     logger.warning(f"⏰ 타임아웃 (시도 {attempt})")
@@ -169,48 +177,49 @@ class ImageGenerator:
                 "cached": False,
             }
 
-    # ── 스크립트에서 프롬프트 추출 ──────────────────────
     @staticmethod
     def extract_prompts(script_text: str) -> list[dict]:
-        """
-        스크립트에서 [이미지 프롬프트] 태그를 파싱하여
-        scene_id와 prompt 목록을 반환.
-        """
         results = []
-        # 패턴: [이미지 프롬프트] 뒤의 텍스트 (다음 태그 또는 줄 끝까지)
-        pattern = re.compile(
-            r'\[이미지\s*프롬프트\]\s*(.+?)(?=\n\s*\[|\n\s*$|\Z)',
+
+        # 패턴 1: [이미지 프롬프트: ... ]
+        pattern1 = re.compile(
+            r'\[이미지\s*프롬프트\s*[:：]\s*(.+?)\]',
             re.DOTALL
         )
-        matches = pattern.findall(script_text)
+        # 패턴 2: [이미지 프롬프트] 뒤 텍스트
+        pattern2 = re.compile(
+            r'\[이미지\s*프롬프트\]\s*(.+?)(?=\s*\[|$)',
+            re.DOTALL
+        )
+        # 패턴 3: [Image Prompt: ... ]
+        pattern3 = re.compile(
+            r'\[Image\s*Prompt\s*[:：]\s*(.+?)\]',
+            re.DOTALL | re.IGNORECASE
+        )
+
+        matches = pattern1.findall(script_text)
+        if not matches:
+            matches = pattern2.findall(script_text)
+        if not matches:
+            matches = pattern3.findall(script_text)
 
         for i, raw in enumerate(matches):
-            # Midjourney 파라미터 제거
             prompt = re.sub(r'--\w+\s+\S+', '', raw).strip()
-            # 줄바꿈 정리
+            korean_cut = re.search(r'[가-힣]{3,}', prompt)
+            if korean_cut:
+                prompt = prompt[:korean_cut.start()].strip()
             prompt = re.sub(r'\s+', ' ', prompt).strip()
-            if prompt:
+            prompt = prompt.rstrip('.],:;')
+
+            if len(prompt) > 20:
                 results.append({
                     "scene_id": f"scene_{i:02d}",
-                    "prompt": prompt,
+                    "prompt": prompt[:MAX_PROMPT_LENGTH],
                 })
-
-        if not results:
-            # 명시 태그가 없을 경우 스크립트 본문을 단일 프롬프트로 자동 생성
-            text = script_text.strip()
-            if text:
-                text = re.sub(r'\s+', ' ', text)
-                text = text[:800].strip()
-                if text:
-                    results.append({
-                        "scene_id": "scene_00",
-                        "prompt": text,
-                    })
 
         logger.info(f"📝 {len(results)}개 이미지 프롬프트 추출")
         return results
 
-    # ── 스크립트 전체 이미지 일괄 생성 ─────────────────
     async def generate_all_from_script(
         self,
         script_text: str,
@@ -218,13 +227,8 @@ class ImageGenerator:
         model: str = DEFAULT_MODEL,
         seed_base: int | None = None,
     ) -> list[dict]:
-        """
-        스크립트에서 프롬프트를 추출하고 전체 이미지를 순차 생성.
-        (Rate limit 준수를 위해 순차 실행)
-        """
         prompts = self.extract_prompts(script_text)
         if not prompts:
-            logger.warning("⚠️ 스크립트에서 이미지 프롬프트를 찾을 수 없습니다")
             return []
 
         results = []

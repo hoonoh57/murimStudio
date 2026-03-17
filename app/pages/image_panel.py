@@ -65,22 +65,21 @@ def create():
 
         async def on_script_select(e):
             """선택한 스크립트 내용 로드"""
-            if not e.value:
+            script_id = e.value if hasattr(e, 'value') else e
+            if not script_id:
                 return
             db = await get_db()
             row = await db.execute(
-                "SELECT content FROM scripts WHERE id = ?", (e.value,)
+                "SELECT content FROM scripts WHERE id = ?", (script_id,)
             )
             result = await row.fetchone()
-            if result:
+            if result and result[0]:
                 script_text_area.value = result[0]
+                script_text_area.update()
+                logger.info(f"스크립트 ID {script_id} 로드: {len(result[0])}자")
 
-        script_select.on("update:model-value", on_script_select)
+        script_select.on_value_change(on_script_select)
 
-        with ui.row().classes("gap-2 mt-2"):
-            ui.button("📂 스크립트 목록 새로고침", on_click=load_scripts).props(
-                "outline"
-            )
 
     # ── 프롬프트 추출 & 편집 ───────────────────────
     with ui.card().classes("w-full mb-4"):
