@@ -27,6 +27,8 @@ class VideoAssembler:
     @staticmethod
     def get_audio_duration(audio_path: str) -> float:
         """FFprobe로 오디오 길이(초) 측정"""
+        if not Path(audio_path).exists() or Path(audio_path).stat().st_size < 100:
+            return 0.0
         try:
             result = subprocess.run(
                 [
@@ -38,10 +40,11 @@ class VideoAssembler:
                 capture_output=True, text=True, timeout=30,
             )
             info = json.loads(result.stdout)
-            return float(info["format"]["duration"])
+            return float(info.get("format", {}).get("duration", 0))
         except Exception as e:
             logger.warning(f"오디오 길이 측정 실패: {e}")
             return 0.0
+
 
     @staticmethod
     def get_image_count(image_dir: str = "static/images", prefix: str = "scene_") -> list[str]:
