@@ -176,26 +176,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         output_path: str,
     ) -> bool:
         """이미지 1장 → Ken Burns 효과 적용 세로 클립 생성"""
-        frames = int(duration * FPS)
+        frames = max(int(duration * FPS), FPS)  # 최소 1초 분량
 
-        # 이미지를 세로(9:16)로 크롭/리사이즈
         effect_template = ShortsMaker.EFFECTS.get(effect, ShortsMaker.EFFECTS["zoom_center"])
         zoompan = effect_template["filter"].format(
             frames=frames, w=WIDTH, h=HEIGHT, fps=FPS
         )
 
-        # 원본 이미지를 세로 비율에 맞게 스케일 후 Ken Burns
+        # 핵심 수정: 이미지를 먼저 세로 비율(9:16)에 맞게 확대/크롭 후 zoompan 적용
+        # 1) scale: 가로 기준으로 넓게 스케일 (zoompan이 줌할 여유 확보)
+        # 2) pad: 세로가 부족하면 패딩
+        # 3) crop: 정확히 필요한 크기로 자르기
+        # 4) zoompan: Ken Burns 효과 (출력 크기 1080x1920)
+        # 5) fade: 인/아웃
+        fade_out_start = max(duration - 0.3, 0.1)
         filter_complex = (
-            f"[0:v]scale={WIDTH * 4}:-1,setsar=1:1,"
-            f"crop={WIDTH * 4}:{HEIGHT * 4},"
+            f"[0:v]"
+            f"scale=w='if(gt(iw/ih,{WIDTH}/{HEIGHT}),{WIDTH}*4,-2)':h='if(gt(iw/ih,{WIDTH}/{HEIGHT}),-2,{HEIGHT}*4)',"
+            f"pad=w='max(iw,{WIDTH}*4)':h='max(ih,{HEIGHT}*4)':x='(ow-iw)/2':y='(oh-ih)/2':color=black,"
+            f"setsar=1:1,"
             f"{zoompan},"
-            f"fade=t=in:st=0:d=0.3,fade=t=out:st={duration - 0.3}:d=0.3"
+            f"fade=t=in:st=0:d=0.3,fade=t=out:st={fade_out_start}:d=0.3"
             f"[out]"
         )
 
         cmd = [
             "ffmpeg", "-y",
-            "-loop", "1", "-i", image_path,
+            "-loop", "1",
+            "-t", str(duration + 1),  # 입력을 duration보다 약간 길게
+            "-i", image_path,
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-c:v", "libx264", "-preset", "fast",
@@ -213,13 +222,55 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"[씬 클립 실패] {stderr.decode()[-500:]}")
-                return False
+                err_text = stderr.decode()[-500:]
+                logger.error(f"[씬 클립 실패] {err_text}")
+                # 폴백: 간단한 스케일만 적용
+                return await ShortsMaker._create_simple_clip(image_path, duration, output_path)
             logger.info(f"[씬 클립] {output_path} ({duration:.1f}s, {effect})")
             return True
         except Exception as e:
             logger.error(f"[씬 클립 에러] {e}")
             return False
+
+    @staticmethod
+    async def _create_simple_clip(
+        image_path: str, duration: float, output_path: str
+    ) -> bool:
+        """Ken Burns 실패 시 폴백 — 단순 스케일+크롭으로 정적 클립 생성"""
+        logger.warning(f"[폴백] 단순 클립 생성: {image_path}")
+        fade_out = max(duration - 0.3, 0.1)
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-t", str(duration + 1),
+            "-i", image_path,
+            "-vf", (
+                f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                f"crop={WIDTH}:{HEIGHT},"
+                f"fade=t=in:st=0:d=0.3,fade=t=out:st={fade_out}:d=0.3"
+            ),
+            "-c:v", "libx264", "-preset", "fast",
+            "-pix_fmt", "yuv420p",
+            "-r", str(FPS),
+            "-t", str(duration),
+            output_path
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(f"[폴백도 실패] {stderr.decode()[-300:]}")
+                return False
+            logger.info(f"[폴백 클립] {output_path} ({duration:.1f}s)")
+            return True
+        except Exception as e:
+            logger.error(f"[폴백 에러] {e}")
+            return False
+
 
     @staticmethod
     async def assemble_shorts(

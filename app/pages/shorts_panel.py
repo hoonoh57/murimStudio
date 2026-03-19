@@ -129,7 +129,6 @@ def create():
         if not val or val not in script_options:
             return
 
-
         sid = script_options[val]
         state["script_id"] = sid
 
@@ -190,7 +189,9 @@ def create():
         except Exception as ex:
             logger.error(f"나레이션 추출 실패: {ex}")
 
-        script_select.on("update:model-value", on_script_select)
+    # ★★★ 이 줄이 on_script_select 함수 바깥에 있어야 함 ★★★
+    script_select.on("update:model-value", on_script_select)
+
 
 
     # === 6. 제작 버튼 ===
