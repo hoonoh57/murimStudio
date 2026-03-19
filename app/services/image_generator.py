@@ -1,6 +1,6 @@
 """
 이미지 생성 서비스 – Pollinations.ai (gen.pollinations.ai + API Key)
-스크립트 ID별 폴더 관리
+스크립트 ID별 폴더 관리, 장르별 스타일 자동 감지
 """
 
 import asyncio
@@ -28,14 +28,144 @@ REQUEST_TIMEOUT = 120
 RETRY_COUNT = 3
 RETRY_DELAY = 5
 RATE_LIMIT_DELAY = 6
-
-STYLE_PREFIX = (
-    "highly detailed digital painting, cinematic lighting, "
-    "ancient Chinese martial arts, wuxia style, dramatic atmosphere, "
-    "8k resolution, trending on artstation"
-)
-
 MAX_PROMPT_LENGTH = 800
+
+# ──────────────────────────────────────────────
+# 장르별 이미지 스타일 프리셋
+# ──────────────────────────────────────────────
+GENRE_STYLES = {
+    "wuxia": {
+        "name": "무협",
+        "prefix": (
+            "highly detailed digital painting, cinematic lighting, "
+            "ancient Chinese martial arts, wuxia style, dramatic atmosphere, "
+            "8k resolution, trending on artstation"
+        ),
+        "keywords": [
+            "화산", "무림", "검", "귀환", "천마", "협객", "무공", "장문인",
+            "사파", "정파", "마교", "비급", "내공", "검기", "도법", "권법",
+            "wuxia", "martial arts", "murim", "cultivation"
+        ],
+    },
+    "anime": {
+        "name": "애니/웹툰",
+        "prefix": (
+            "anime style illustration, vibrant colors, detailed character art, "
+            "Japanese animation aesthetic, clean linework, expressive eyes, "
+            "high quality anime key visual, trending on pixiv"
+        ),
+        "keywords": [
+            "봇치", "록", "애니", "웹툰", "학교", "밴드", "마법소녀",
+            "아이돌", "하렘", "이세계", "anime", "manga", "webtoon",
+            "isekai", "school", "shounen", "shoujo"
+        ],
+    },
+    "comedy": {
+        "name": "코미디/일상",
+        "prefix": (
+            "colorful cartoon style illustration, expressive characters, "
+            "comedic tone, bright warm lighting, fun atmosphere, "
+            "clean digital art, vibrant palette"
+        ),
+        "keywords": [
+            "놓지마", "개그", "코미디", "일상", "웃긴", "톡", "gag",
+            "comedy", "slice of life", "daily", "funny", "sitcom"
+        ],
+    },
+    "fantasy": {
+        "name": "판타지",
+        "prefix": (
+            "epic fantasy art, magical atmosphere, detailed world-building, "
+            "cinematic lighting, mystical glow, high fantasy illustration, "
+            "8k resolution, trending on artstation"
+        ),
+        "keywords": [
+            "마법", "던전", "용사", "이세계", "마왕", "레벨", "헌터",
+            "소환", "정령", "드래곤", "fantasy", "dungeon", "dragon",
+            "magic", "sorcery", "hunter", "guild", "mana"
+        ],
+    },
+    "romance": {
+        "name": "로맨스",
+        "prefix": (
+            "soft romantic illustration, warm pastel tones, gentle lighting, "
+            "emotional mood, beautiful character art, dreamy atmosphere, "
+            "high quality digital painting"
+        ),
+        "keywords": [
+            "로맨스", "사랑", "연애", "고백", "첫사랑", "러브",
+            "romance", "love", "dating", "confession", "heartfelt"
+        ],
+    },
+    "action": {
+        "name": "액션/배틀",
+        "prefix": (
+            "dynamic action scene, intense cinematic lighting, high contrast, "
+            "powerful composition, explosive energy, motion blur effects, "
+            "manhwa action style, 8k resolution"
+        ),
+        "keywords": [
+            "배틀", "전투", "격투", "싸움", "능력자", "히어로",
+            "action", "battle", "fight", "combat", "hero", "villain",
+            "superhero", "power"
+        ],
+    },
+    "horror": {
+        "name": "호러/스릴러",
+        "prefix": (
+            "dark horror atmosphere, eerie lighting, unsettling mood, "
+            "detailed shadows, creepy composition, psychological tension, "
+            "cinematic horror art style"
+        ),
+        "keywords": [
+            "공포", "호러", "귀신", "좀비", "저주", "괴담",
+            "horror", "thriller", "ghost", "zombie", "curse", "dark"
+        ],
+    },
+    "neutral": {
+        "name": "기본 (장르 자동)",
+        "prefix": (
+            "high quality digital illustration, cinematic lighting, "
+            "detailed art, vivid colors, professional composition, "
+            "8k resolution, trending on artstation"
+        ),
+        "keywords": [],
+    },
+}
+
+
+def detect_genre(title: str, content: str = "") -> str:
+    """프로젝트 제목과 스크립트 내용으로 장르 자동 감지"""
+    text = (title + " " + content[:500]).lower()
+
+    best_genre = "neutral"
+    best_score = 0
+
+    for genre_key, genre_info in GENRE_STYLES.items():
+        if genre_key == "neutral":
+            continue
+        score = sum(1 for kw in genre_info["keywords"] if kw.lower() in text)
+        if score > best_score:
+            best_score = score
+            best_genre = genre_key
+
+    logger.info(f"🎭 장르 감지: '{title}' → {best_genre} ({GENRE_STYLES[best_genre]['name']}, 점수={best_score})")
+    return best_genre
+
+
+def get_style_prefix(genre: str = "neutral") -> str:
+    """장르에 맞는 스타일 프리픽스 반환"""
+    if genre in GENRE_STYLES:
+        return GENRE_STYLES[genre]["prefix"]
+    return GENRE_STYLES["neutral"]["prefix"]
+
+
+def get_genre_list() -> list[dict]:
+    """UI용 장르 목록 반환"""
+    return [
+        {"key": k, "name": v["name"]}
+        for k, v in GENRE_STYLES.items()
+    ]
 
 
 class ImageGenerator:
@@ -51,14 +181,12 @@ class ImageGenerator:
 
     @staticmethod
     def get_script_dir(script_id: int) -> Path:
-        """스크립트 ID별 이미지 폴더"""
         d = BASE_IMAGE_DIR / f"script_{script_id}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     @staticmethod
     def list_script_folders() -> list[dict]:
-        """모든 스크립트 이미지 폴더 목록"""
         results = []
         if not BASE_IMAGE_DIR.exists():
             return results
@@ -79,7 +207,6 @@ class ImageGenerator:
 
     @staticmethod
     def get_images_for_script(script_id: int) -> list[str]:
-        """특정 스크립트의 이미지 경로 목록 (정렬)"""
         d = BASE_IMAGE_DIR / f"script_{script_id}"
         if not d.exists():
             return []
@@ -90,7 +217,7 @@ class ImageGenerator:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            headers = {"User-Agent": "MurimStudio/1.4"}
+            headers = {"User-Agent": "MurimStudio/1.6"}
             if API_KEY:
                 headers["Authorization"] = f"Bearer {API_KEY}"
             self._client = httpx.AsyncClient(
@@ -110,6 +237,7 @@ class ImageGenerator:
         *,
         script_id: int = 0,
         scene_id: str = "scene",
+        genre: str = "neutral",
         model: str = DEFAULT_MODEL,
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
@@ -118,7 +246,10 @@ class ImageGenerator:
         add_style: bool = True,
     ) -> dict:
         prompt = prompt[:MAX_PROMPT_LENGTH].strip()
-        full_prompt = f"{STYLE_PREFIX}, {prompt}" if add_style else prompt
+
+        # 장르별 스타일 적용
+        style = get_style_prefix(genre)
+        full_prompt = f"{style}, {prompt}" if add_style else prompt
 
         encoded = quote(full_prompt)
         params = {
@@ -138,17 +269,15 @@ class ImageGenerator:
 
         if len(url) > 2048:
             short_prompt = prompt[:400].strip()
-            full_prompt = f"{STYLE_PREFIX}, {short_prompt}" if add_style else short_prompt
+            full_prompt = f"{style}, {short_prompt}" if add_style else short_prompt
             encoded = quote(full_prompt)
             url = f"{BASE_URL}/{encoded}?{param_str}"
 
-        # 스크립트별 폴더에 저장
         output_dir = self.get_script_dir(script_id) if script_id else BASE_IMAGE_DIR
         prompt_hash = hashlib.md5(full_prompt.encode()).hexdigest()[:8]
         filename = f"{scene_id}_{prompt_hash}.jpg"
         filepath = output_dir / filename
 
-        # 웹 접근 URL
         if script_id:
             web_url = f"/static/images/script_{script_id}/{filename}"
         else:
@@ -161,6 +290,7 @@ class ImageGenerator:
                 "path": str(filepath),
                 "url": web_url,
                 "prompt": prompt,
+                "genre": genre,
                 "elapsed": 0.0,
                 "cached": True,
             }
@@ -177,7 +307,10 @@ class ImageGenerator:
 
             for attempt in range(1, RETRY_COUNT + 1):
                 try:
-                    logger.info(f"🎨 [{scene_id}] 생성 중 (시도 {attempt}/{RETRY_COUNT})")
+                    logger.info(
+                        f"🎨 [{scene_id}] 생성 중 (시도 {attempt}/{RETRY_COUNT}, "
+                        f"장르={GENRE_STYLES.get(genre, {}).get('name', genre)})"
+                    )
                     resp = await client.get(url)
                     self._last_request_time = time.time()
 
@@ -191,12 +324,15 @@ class ImageGenerator:
                             "path": str(filepath),
                             "url": web_url,
                             "prompt": prompt,
+                            "genre": genre,
                             "elapsed": elapsed,
                             "cached": False,
                         }
                     else:
                         body = resp.text[:200]
-                        logger.warning(f"⚠️ status={resp.status_code}, size={len(resp.content)}, body={body}")
+                        logger.warning(
+                            f"⚠️ status={resp.status_code}, size={len(resp.content)}, body={body}"
+                        )
                 except httpx.TimeoutException:
                     logger.warning(f"⏰ 타임아웃 (시도 {attempt})")
                 except httpx.HTTPError as e:
@@ -207,7 +343,11 @@ class ImageGenerator:
 
             elapsed = time.time() - start
             logger.error(f"❌ 이미지 생성 실패: {scene_id}")
-            return {"success": False, "path": "", "url": "", "prompt": prompt, "elapsed": elapsed, "cached": False}
+            return {
+                "success": False, "path": "", "url": "",
+                "prompt": prompt, "genre": genre,
+                "elapsed": elapsed, "cached": False,
+            }
 
     @staticmethod
     def extract_prompts(script_text: str) -> list[dict]:
@@ -284,21 +424,29 @@ class ImageGenerator:
 
     async def generate_all_from_script(
         self, script_text: str, *, script_id: int = 0,
+        genre: str = "neutral",
         model: str = DEFAULT_MODEL, seed_base: int | None = None,
     ) -> list[dict]:
         prompts = self.extract_prompts(script_text)
         if not prompts:
             return []
+
+        # 장르 자동 감지 (neutral이면)
+        if genre == "neutral":
+            genre = detect_genre("", script_text)
+
         results = []
         total = len(prompts)
         for i, item in enumerate(prompts):
-            logger.info(f"🖼️ [{i+1}/{total}] {item['scene_id']}")
+            logger.info(f"🖼️ [{i+1}/{total}] {item['scene_id']} (장르: {genre})")
             seed = (seed_base + i) if seed_base is not None else None
             result = await self.generate(
                 item["prompt"], script_id=script_id,
-                scene_id=item["scene_id"], model=model, seed=seed,
+                scene_id=item["scene_id"], genre=genre,
+                model=model, seed=seed,
             )
             results.append(result)
+
         success = sum(1 for r in results if r["success"])
-        logger.info(f"🎨 완료: {success}/{total} 성공")
+        logger.info(f"🎨 완료: {success}/{total} 성공 (장르: {genre})")
         return results

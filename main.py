@@ -9,7 +9,8 @@ from app.pages import (
 )
 from app.pages import image_panel
 from app.pages import video_panel
-from app.pages import asset_browser      # ← 추가
+from app.pages import asset_browser
+from app.pages import shorts_panel       # ← 추가
 
 
 @ui.page('/')
@@ -17,7 +18,7 @@ async def index():
     with ui.header().classes('bg-gray-900 text-white items-center'):
         ui.label('⚔️ 무협 팩토리').classes('text-xl font-bold')
         ui.space()
-        ui.label('v1.5').classes('text-sm text-gray-400')
+        ui.label('v1.6').classes('text-sm text-gray-400')
 
     with ui.tabs().classes('w-full') as tabs:
         tab_dash    = ui.tab('📊 대시보드')
@@ -26,7 +27,8 @@ async def index():
         tab_tts     = ui.tab('🔊 TTS')
         tab_image   = ui.tab('🎨 이미지')
         tab_video   = ui.tab('🎬 영상')
-        tab_assets  = ui.tab('📦 제작물')    # ← 새 탭
+        tab_shorts  = ui.tab('📱 숏츠')      # ← 새 탭
+        tab_assets  = ui.tab('📦 제작물')
         tab_channel = ui.tab('📺 채널')
         tab_cost    = ui.tab('💰 비용')
 
@@ -43,7 +45,9 @@ async def index():
             image_panel.create()
         with ui.tab_panel(tab_video):
             video_panel.create()
-        with ui.tab_panel(tab_assets):     # ← 제작물 패널
+        with ui.tab_panel(tab_shorts):     # ← 숏츠 패널
+            shorts_panel.create()
+        with ui.tab_panel(tab_assets):
             asset_browser.create()
         with ui.tab_panel(tab_channel):
             await channel_hub.channel_page()
