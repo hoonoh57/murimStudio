@@ -1,7 +1,8 @@
-"""TTS 서비스 – Edge TTS 기반 다국어 음성 생성 (확장판)"""
+"""TTS 서비스 – Edge TTS 기반 다국어 음성 생성 (v1.7.1 — 제어문 필터링 + 씬별 오디오)"""
 
 import os
 import re
+import json
 import logging
 import asyncio
 from dataclasses import dataclass
@@ -60,6 +61,37 @@ AUDIO_DIR = Path("output/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# ──────────────────────────────────────────────
+# 제어문 패턴 (TTS가 읽으면 안 되는 모든 태그)
+# ──────────────────────────────────────────────
+# [HOOK - 0:00~0:05], [SCENE 1 - 0:05~2:00], [PROBLEM - 3~10초],
+# [SOLUTION - 10~25초], [CTA - 마지막 3초], [OUTRO - 마지막 10초] 등
+CONTROL_TAG_PATTERN = re.compile(
+    r'\['
+    r'(?:HOOK|SCENE\s*\d*|OUTRO|PROBLEM|SOLUTION|CTA|INTRO|BRIDGE|TRANSITION|CLIMAX|ENDING)'
+    r'[^\]]*'
+    r'\]',
+    re.IGNORECASE
+)
+
+# [이미지 프롬프트: ...], [Image Prompt: ...], [BGM: ...], [SFX: ...],
+# [자막: ...], [효과: ...], [음향: ...], [영상: ...]
+PROMPT_TAG_PATTERN = re.compile(
+    r'\['
+    r'(?:이미지\s*프롬프트|Image\s*Prompt|BGM|bgm|SFX|sfx|SE|'
+    r'자막|자막\s*스타일|효과|음향|영상|비디오|썸네일|thumbnail)'
+    r'[^\]]*'
+    r'\]',
+    re.IGNORECASE
+)
+
+# **[HOOK]**, **[SCENE 1]** 형태의 볼드 태그
+BOLD_TAG_PATTERN = re.compile(r'\*\*\[[^\]]*\]\*\*')
+
+# 시간 표기만 있는 줄: 0:00~0:05, 00:00-00:05 등
+TIME_ONLY_PATTERN = re.compile(r'^\s*\d{1,2}:\d{2}\s*[~\-–—]\s*\d{1,2}:\d{2}\s*$')
+
+
 class TTSService:
     """Edge TTS 기반 음성 생성 서비스"""
 
@@ -114,7 +146,10 @@ class TTSService:
                     f"텍스트나 보이스 설정을 확인하세요."
                 )
 
-            duration_sec = round(file_size / (128 * 1024 / 8), 1)
+            # ffprobe로 정확한 길이 측정 (실패 시 추정값)
+            duration_sec = await TTSService._get_audio_duration(str(output_path))
+            if duration_sec <= 0:
+                duration_sec = round(file_size / (128 * 1024 / 8), 1)
 
             logger.info(
                 f"[TTS] 생성 완료: {output_filename} "
@@ -134,6 +169,22 @@ class TTSService:
         except Exception as e:
             logger.error(f"[TTS] 생성 실패: {e}")
             raise
+
+    @staticmethod
+    async def _get_audio_duration(audio_path: str) -> float:
+        """ffprobe로 오디오 정확한 길이 측정"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", audio_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            data = json.loads(stdout.decode())
+            return float(data["format"]["duration"])
+        except Exception:
+            return 0.0
 
     @staticmethod
     async def generate_preview(
@@ -200,32 +251,194 @@ class TTSService:
 
     @staticmethod
     def _extract_narration(script: str) -> str:
-        """스크립트에서 나레이션 텍스트만 추출 (태그·프롬프트·영어 주석 제거)"""
+        """스크립트에서 나레이션 텍스트만 추출
+        — 제어문([HOOK], [SCENE], [PROBLEM - 3~10초] 등),
+          프롬프트([이미지 프롬프트:], [BGM:], [SFX:] 등),
+          볼드 태그(**[...]**), 시간 표기, 영어 주석 모두 제거
+        """
         lines = script.split('\n')
         narration_lines = []
 
         for line in lines:
             stripped = line.strip()
-            if any(stripped.startswith(tag) for tag in [
-                '[이미지 프롬프트', '[이미지프롬프트', '[Image Prompt',
-                '[image prompt', '[BGM', '[bgm',
-                '[HOOK', '[SCENE', '[OUTRO',
-            ]):
-                continue
             if not stripped:
                 continue
-            if stripped.startswith('**[') and stripped.endswith(']**'):
+
+            # 1) 볼드 태그 줄 전체 스킵: **[HOOK - 0:00~1.5초]**
+            if BOLD_TAG_PATTERN.match(stripped):
                 continue
+
+            # 2) 제어문 태그 제거: [HOOK - 0:00~0:05], [PROBLEM - 3~10초], [CTA - 마지막 3초]
+            stripped = CONTROL_TAG_PATTERN.sub('', stripped)
+
+            # 3) 프롬프트 태그가 포함된 줄 전체 스킵 (태그가 줄의 대부분인 경우)
+            if PROMPT_TAG_PATTERN.search(line):
+                continue
+
+            # 4) 마크다운 헤더 스킵
             if stripped.startswith('#'):
                 continue
 
-            # 괄호 안 영어 설명 제거: (Hidden Master), (Martial Arts) 등
+            # 5) 시간만 있는 줄 스킵
+            if TIME_ONLY_PATTERN.match(stripped):
+                continue
+
+            # 6) 괄호 안 영어 설명 제거: (Hidden Master), (Martial Arts) 등
             cleaned = re.sub(r'\([A-Za-z][A-Za-z\s,\'\.~\-]*\)', '', stripped)
             cleaned = cleaned.replace('()', '')
+
+            # 7) Midjourney 파라미터 제거: --ar 16:9, --v 5.2
+            cleaned = re.sub(r'--\w+\s+\S+', '', cleaned)
+
+            # 8) 연속 공백 정리
             cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
-            cleaned = re.sub(r'--\w+\s+\S+', '', cleaned).strip()
 
-            if cleaned:
-                narration_lines.append(cleaned)
+            # 9) 너무 짧으면 스킵 (제어문만 있던 줄)
+            if len(cleaned) < 2:
+                continue
 
-        return '\n'.join(narration_lines)
+            narration_lines.append(cleaned)
+
+        result = '\n'.join(narration_lines)
+        logger.debug(f"[나레이션 추출] 원문 {len(script)}자 → 추출 {len(result)}자")
+        return result
+
+    # ──────────────────────────────────────────────
+    # 씬별 나레이션 분리 (숏츠/롱폼 공용)
+    # ──────────────────────────────────────────────
+    @staticmethod
+    def extract_scenes(script: str) -> List[dict]:
+        """스크립트를 씬 단위로 분리하여 각 씬의 나레이션, 이미지프롬프트,
+        BGM, SFX, 자막 스타일, 시간 정보를 딕셔너리 리스트로 반환.
+
+        반환 예시:
+        [
+            {
+                "section": "HOOK",
+                "time_hint": "0~1.5초",
+                "narration": "기타 천재 소녀의 충격적인 비밀!",
+                "image_prompt": "close-up of girl playing guitar ...",
+                "bgm": "tension_building",
+                "sfx": "",
+                "subtitle_style": "",
+                "video_note": "",
+            },
+            ...
+        ]
+        """
+        # 섹션 시작 패턴: [HOOK - 0:00~0:05] 또는 [SCENE 1 - 0:05~2:00] 등
+        section_pattern = re.compile(
+            r'\[?\*{0,2}\[?'
+            r'(HOOK|SCENE\s*\d*|OUTRO|PROBLEM|SOLUTION|CTA|INTRO|BRIDGE|CLIMAX|ENDING)'
+            r'(?:\s*[-–—]\s*(.+?))?'
+            r'\]?\*{0,2}\]?'
+            r'\s*$',
+            re.IGNORECASE
+        )
+
+        image_prompt_pattern = re.compile(
+            r'\[이미지\s*프롬프트\s*[:：]\s*(.+?)\]'
+            r'|\[Image\s*Prompt\s*[:：]\s*(.+?)\]',
+            re.DOTALL | re.IGNORECASE
+        )
+        bgm_pattern = re.compile(r'\[BGM\s*[:：]\s*(.+?)\]', re.IGNORECASE)
+        sfx_pattern = re.compile(r'\[SFX\s*[:：]\s*(.+?)\]', re.IGNORECASE)
+        subtitle_pattern = re.compile(r'\[자막(?:\s*스타일)?\s*[:：]\s*(.+?)\]', re.IGNORECASE)
+        video_pattern = re.compile(r'\[영상\s*[:：]\s*(.+?)\]', re.IGNORECASE)
+
+        scenes = []
+        current = None
+
+        for line in script.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # 새 섹션 시작?
+            m = section_pattern.match(stripped)
+            if m:
+                if current is not None:
+                    scenes.append(current)
+                current = {
+                    "section": m.group(1).strip().upper(),
+                    "time_hint": (m.group(2) or "").strip(),
+                    "narration": "",
+                    "image_prompt": "",
+                    "bgm": "",
+                    "sfx": "",
+                    "subtitle_style": "",
+                    "video_note": "",
+                }
+                continue
+
+            if current is None:
+                # 섹션 헤더 전에 나온 내용은 기본 섹션으로
+                current = {
+                    "section": "INTRO",
+                    "time_hint": "",
+                    "narration": "",
+                    "image_prompt": "",
+                    "bgm": "",
+                    "sfx": "",
+                    "subtitle_style": "",
+                    "video_note": "",
+                }
+
+            # 이미지 프롬프트
+            img_m = image_prompt_pattern.search(stripped)
+            if img_m:
+                current["image_prompt"] = (img_m.group(1) or img_m.group(2) or "").strip()
+                continue
+
+            # BGM
+            bgm_m = bgm_pattern.search(stripped)
+            if bgm_m:
+                current["bgm"] = bgm_m.group(1).strip()
+                continue
+
+            # SFX
+            sfx_m = sfx_pattern.search(stripped)
+            if sfx_m:
+                current["sfx"] = sfx_m.group(1).strip()
+                continue
+
+            # 자막 스타일
+            sub_m = subtitle_pattern.search(stripped)
+            if sub_m:
+                current["subtitle_style"] = sub_m.group(1).strip()
+                continue
+
+            # 영상 노트
+            vid_m = video_pattern.search(stripped)
+            if vid_m:
+                current["video_note"] = vid_m.group(1).strip()
+                continue
+
+            # 볼드 태그 줄 스킵
+            if BOLD_TAG_PATTERN.match(stripped):
+                continue
+
+            # 제어문 줄 스킵 (이미 section_pattern으로 캐치 안 된 것)
+            if CONTROL_TAG_PATTERN.match(stripped):
+                continue
+
+            # 마크다운 헤더 스킵
+            if stripped.startswith('#'):
+                continue
+
+            # 나머지 = 나레이션
+            cleaned = re.sub(r'\([A-Za-z][A-Za-z\s,\'\.~\-]*\)', '', stripped)
+            cleaned = cleaned.replace('()', '')
+            cleaned = re.sub(r'--\w+\s+\S+', '', cleaned)
+            cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+            if len(cleaned) >= 2:
+                if current["narration"]:
+                    current["narration"] += "\n" + cleaned
+                else:
+                    current["narration"] = cleaned
+
+        if current is not None:
+            scenes.append(current)
+
+        logger.info(f"[씬 분리] {len(scenes)}개 씬 추출")
+        return scenes

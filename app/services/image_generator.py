@@ -462,6 +462,7 @@ class ImageGenerator:
     async def generate_all_from_script(
         self, script_text: str, *, script_id: int = 0,
         genre: str = "neutral",
+        format: str = "long",           # ← 파라미터 추가 (버그 수정)
         model: str = DEFAULT_MODEL, seed_base: int | None = None,
     ) -> list[dict]:
         prompts = self.extract_prompts(script_text)
@@ -472,19 +473,25 @@ class ImageGenerator:
         if genre == "neutral":
             genre = detect_genre("", script_text)
 
+        # 포맷별 설정 로그
+        fmt_settings = FORMAT_SETTINGS.get(format, FORMAT_SETTINGS["long"])
+        logger.info(
+            f"📐 포맷: {format} → {fmt_settings['width']}×{fmt_settings['height']}"
+        )
+
         results = []
         total = len(prompts)
         for i, item in enumerate(prompts):
-            logger.info(f"🖼️ [{i+1}/{total}] {item['scene_id']} (장르: {genre})")
+            logger.info(f"🖼️ [{i+1}/{total}] {item['scene_id']} (장르: {genre}, 포맷: {format})")
             seed = (seed_base + i) if seed_base is not None else None
             result = await self.generate(
                 item["prompt"], script_id=script_id,
                 scene_id=item["scene_id"], genre=genre,
-                format=format,          # ← 추가
+                format=format,
                 model=model, seed=seed,
             )
             results.append(result)
 
         success = sum(1 for r in results if r["success"])
-        logger.info(f"🎨 완료: {success}/{total} 성공 (장르: {genre})")
+        logger.info(f"🎨 완료: {success}/{total} 성공 (장르: {genre}, 포맷: {format})")
         return results
