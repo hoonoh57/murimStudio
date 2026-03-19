@@ -1,4 +1,4 @@
-"""스크립트 공장 UI — 생성 + 번역 + 목록 관리"""
+"""스크립트 공장 UI — 생성 + 번역 + 목록 관리 (포맷/장르 지원)"""
 
 from nicegui import ui
 from app.services.script_factory import ScriptFactory
@@ -6,7 +6,7 @@ from app.services.script_factory import ScriptFactory
 
 async def script_page():
     ui.label('✍️ 스크립트 공장').classes('text-xl font-bold')
-    ui.label('Gemini AI 기반 무협 리캡 대본 생성 · 다국어 번역').classes(
+    ui.label('Gemini AI 기반 리캡 대본 생성 · 다국어 번역 · 숏츠/롱폼 분기').classes(
         'text-sm text-gray-500 mt-1'
     )
 
@@ -23,17 +23,66 @@ async def script_page():
             episodes_input = ui.input('회차 범위', value='51~100화').classes('flex-1')
 
         with ui.row().classes('w-full gap-4 items-end'):
-            duration_input = ui.number('길이(분)', value=10, min=3, max=30).classes('w-32')
+            format_select = ui.select(
+                {
+                    'shorts_30': '📱 숏츠 (30초)',
+                    'shorts_45': '📱 숏츠 (45초)',
+                    'shorts_59': '📱 숏츠 (59초)',
+                    'long_5': '🎬 롱폼 (5분)',
+                    'long_10': '🎬 롱폼 (10분)',
+                    'long_15': '🎬 롱폼 (15분)',
+                },
+                value='long_10',
+                label='포맷',
+            ).classes('w-48')
+
+            genre_select = ui.select(
+                {
+                    'wuxia': '⚔️ 무협',
+                    'anime': '🎌 애니',
+                    'comedy': '😂 코미디',
+                    'fantasy': '🧙 판타지',
+                    'romance': '💕 로맨스',
+                    'action': '💥 액션',
+                    'horror': '👻 호러',
+                    'neutral': '📝 범용',
+                },
+                value='wuxia',
+                label='장르',
+            ).classes('w-40')
+
             style_select = ui.select(
                 ['긴장감+감동', '코미디+액션', '미스터리+반전', '감성+성장'],
                 value='긴장감+감동',
                 label='스타일',
             ).classes('flex-1')
+
             lang_select = ui.select(
                 {'ko': '한국어', 'en': 'English', 'id': 'Indonesia', 'th': 'ไทย'},
                 value='ko',
                 label='언어',
             ).classes('w-40')
+
+        # 포맷 안내
+        format_info = ui.label('').classes('text-sm text-blue-400 mt-1')
+
+        def update_format_info():
+            val = format_select.value
+            if val and val.startswith('shorts'):
+                secs = val.split('_')[1]
+                format_info.set_text(
+                    f'📱 숏츠 모드: {secs}초 세로영상 | 나레이션 200자 이내 | '
+                    f'이미지 9:16 | HOOK→PROBLEM→SOLUTION→CTA 구조'
+                )
+            else:
+                mins = val.split('_')[1] if val else '10'
+                format_info.set_text(
+                    f'🎬 롱폼 모드: {mins}분 가로영상 | 이미지 16:9 | '
+                    f'HOOK→SCENE×N→OUTRO 구조'
+                )
+
+        format_select.on("update:model-value", lambda e: update_format_info())
+        update_format_info()
 
     # ══════════════════════════════════════
     #  번역 폼
@@ -78,12 +127,15 @@ async def script_page():
             with ui.element('table').classes('w-full'):
                 with ui.element('thead'):
                     with ui.element('tr').classes('text-left text-gray-400 text-sm'):
-                        for col in ['ID', '작품명', '언어', '상태', '비용', '생성일', '미리보기']:
+                        for col in ['ID', '작품명', '포맷', '장르', '언어', '상태', '비용', '생성일']:
                             with ui.element('th').classes('p-2'):
                                 ui.label(col)
                 with ui.element('tbody'):
                     for s in scripts:
                         sid = s.get('id', 0)
+                        fmt = s.get('format', 'long')
+                        fmt_badge = '📱' if fmt == 'shorts' else '🎬'
+                        genre = s.get('genre', 'neutral')
                         with ui.element('tr').classes('border-t border-gray-700 hover:bg-gray-800'):
                             with ui.element('td').classes('p-2'):
                                 ui.link(
@@ -92,6 +144,10 @@ async def script_page():
                                 ).classes('text-blue-400 hover:text-blue-300 font-bold no-underline')
                             with ui.element('td').classes('p-2'):
                                 ui.label(s.get('project_title', ''))
+                            with ui.element('td').classes('p-2'):
+                                ui.label(f'{fmt_badge} {fmt}')
+                            with ui.element('td').classes('p-2'):
+                                ui.label(genre)
                             with ui.element('td').classes('p-2'):
                                 ui.label(s.get('language', ''))
                             with ui.element('td').classes('p-2'):
@@ -102,23 +158,41 @@ async def script_page():
                                 ui.label(f"${s.get('cost_usd', 0):.4f}")
                             with ui.element('td').classes('p-2'):
                                 ui.label((s.get('created_at', '') or '')[:19]).classes('text-sm')
-                            with ui.element('td').classes('p-2 max-w-xs truncate'):
-                                snippet = (s.get('snippet', '') or '').replace('\n', ' ')[:100]
-                                ui.label(snippet).classes('text-sm text-gray-400')
 
     async def reload_scripts():
         scripts = await factory.list_scripts()
         build_script_table(scripts)
-        status_label.text = f'총 {len(scripts)}개 스크립트'
+        shorts_count = sum(1 for s in scripts if s.get('format') == 'shorts')
+        long_count = sum(1 for s in scripts if s.get('format', 'long') == 'long')
+        status_label.text = f'총 {len(scripts)}개 스크립트 (📱숏츠 {shorts_count} | 🎬롱폼 {long_count})'
 
     async def create_script():
-        ui.notify('스크립트 생성 중… (AI API 호출)', color='blue')
+        # 포맷 파싱
+        fmt_val = format_select.value or 'long_10'
+        parts = fmt_val.split('_')
+        fmt = parts[0]  # 'shorts' or 'long'
+
+        if fmt == 'shorts':
+            duration = int(parts[1])  # 초 단위
+        else:
+            duration = int(parts[1])  # 분 단위
+
+        genre = genre_select.value or 'neutral'
+
+        ui.notify(
+            f'{"📱 숏츠" if fmt == "shorts" else "🎬 롱폼"} 스크립트 생성 중… '
+            f'(장르: {genre}, AI API 호출)',
+            color='blue'
+        )
+
         result = await factory.generate_script(
             title=title_input.value,
             episodes=episodes_input.value,
-            duration_min=int(duration_input.value),
+            duration_min=duration,
             style=style_select.value,
             language=lang_select.value,
+            format=fmt,
+            genre=genre,
         )
         await reload_scripts()
 

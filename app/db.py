@@ -19,7 +19,7 @@ async def get_db():
 async def init_db():
     conn = await get_db()
     try:
-        # ── 기존 6개 테이블 ──
+        # ── 기존 테이블 ──
         await conn.execute('''CREATE TABLE IF NOT EXISTS api_costs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             service TEXT NOT NULL,
@@ -93,7 +93,6 @@ async def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id)
         )''')
 
-        # ── 신규 2개 테이블: 트렌드 캐시 + 랭킹 결과 ──
         await conn.execute('''CREATE TABLE IF NOT EXISTS trend_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -115,6 +114,35 @@ async def init_db():
             collected_at TEXT NOT NULL
         )''')
 
+        # ── P0-1: scripts 테이블에 format, genre, target_duration 컬럼 추가 ──
+        for col, col_type, default in [
+            ('format', 'TEXT', "'long'"),
+            ('genre', 'TEXT', "'neutral'"),
+            ('target_duration', 'INTEGER', '600'),
+        ]:
+            try:
+                await conn.execute(
+                    f"ALTER TABLE scripts ADD COLUMN {col} {col_type} DEFAULT {default}"
+                )
+                logger.info(f"[DB 마이그레이션] scripts.{col} 컬럼 추가됨")
+            except Exception:
+                pass  # 이미 존재하면 무시
+
+        # ── P0-1: shorts_metadata 테이블 신규 ──
+        await conn.execute('''CREATE TABLE IF NOT EXISTS shorts_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            script_id INTEGER NOT NULL,
+            hook_type TEXT DEFAULT 'mystery',
+            hook_text TEXT DEFAULT '',
+            cta_text TEXT DEFAULT '',
+            loop_enabled INTEGER DEFAULT 1,
+            bgm_id TEXT DEFAULT '',
+            target_length INTEGER DEFAULT 30,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (script_id) REFERENCES scripts(id)
+        )''')
+
         # 기본 채널 데이터 시드
         for code, name, tz, hour in [
             ('en', 'Murim Recap EN', 'US/Eastern', 18),
@@ -128,6 +156,6 @@ async def init_db():
                 (code, name, tz, hour))
 
         await conn.commit()
-        logger.info('Database initialized with 8 tables + seed data')
+        logger.info('Database initialized with 9 tables + seed data (v1.7 schema)')
     finally:
         await conn.close()

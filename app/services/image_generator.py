@@ -21,9 +21,25 @@ BASE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 API_KEY = os.getenv("POLLINATIONS_API_KEY", "")
 BASE_URL = "https://gen.pollinations.ai/image"
-DEFAULT_MODEL = "flux"
+# 기본 설정 (롱폼)
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
+DEFAULT_MODEL = "flux"
+
+# 포맷별 해상도
+FORMAT_SETTINGS = {
+    "long": {
+        "width": 1920,
+        "height": 1080,
+        "composition_suffix": "",  # 기존 그대로
+    },
+    "shorts": {
+        "width": 1080,
+        "height": 1920,
+        "composition_suffix": ", vertical composition, close-up portrait, dramatic expression, mobile-optimized, 9:16 aspect ratio",
+    },
+}
+
 REQUEST_TIMEOUT = 120
 RETRY_COUNT = 3
 RETRY_DELAY = 5
@@ -238,18 +254,32 @@ class ImageGenerator:
         script_id: int = 0,
         scene_id: str = "scene",
         genre: str = "neutral",
+        format: str = "long",           # ← 추가
         model: str = DEFAULT_MODEL,
-        width: int = DEFAULT_WIDTH,
-        height: int = DEFAULT_HEIGHT,
+        width: int = 0,                 # ← 0이면 format에서 자동 결정
+        height: int = 0,                # ← 0이면 format에서 자동 결정
         seed: int | None = None,
         enhance: bool = True,
         add_style: bool = True,
     ) -> dict:
+        """이미지 생성 (포맷에 따라 해상도/구도 자동 분기)"""
+
+        # ── 포맷별 해상도/구도 자동 결정 ──
+        fmt_settings = FORMAT_SETTINGS.get(format, FORMAT_SETTINGS["long"])
+        if width == 0:
+            width = fmt_settings["width"]
+        if height == 0:
+            height = fmt_settings["height"]
+        composition_suffix = fmt_settings.get("composition_suffix", "")
+
         prompt = prompt[:MAX_PROMPT_LENGTH].strip()
 
         # 장르별 스타일 적용
         style = get_style_prefix(genre)
-        full_prompt = f"{style}, {prompt}" if add_style else prompt
+        if add_style:
+            full_prompt = f"{style}, {prompt}{composition_suffix}"
+        else:
+            full_prompt = f"{prompt}{composition_suffix}"
 
         encoded = quote(full_prompt)
         params = {
@@ -269,7 +299,10 @@ class ImageGenerator:
 
         if len(url) > 2048:
             short_prompt = prompt[:400].strip()
-            full_prompt = f"{style}, {short_prompt}" if add_style else short_prompt
+            if add_style:
+                full_prompt = f"{style}, {short_prompt}{composition_suffix}"
+            else:
+                full_prompt = f"{short_prompt}{composition_suffix}"
             encoded = quote(full_prompt)
             url = f"{BASE_URL}/{encoded}?{param_str}"
 
@@ -291,6 +324,7 @@ class ImageGenerator:
                 "url": web_url,
                 "prompt": prompt,
                 "genre": genre,
+                "format": format,
                 "elapsed": 0.0,
                 "cached": True,
             }
@@ -309,7 +343,8 @@ class ImageGenerator:
                 try:
                     logger.info(
                         f"🎨 [{scene_id}] 생성 중 (시도 {attempt}/{RETRY_COUNT}, "
-                        f"장르={GENRE_STYLES.get(genre, {}).get('name', genre)})"
+                        f"장르={GENRE_STYLES.get(genre, {}).get('name', genre)}, "
+                        f"포맷={format}, {width}x{height})"
                     )
                     resp = await client.get(url)
                     self._last_request_time = time.time()
@@ -325,6 +360,7 @@ class ImageGenerator:
                             "url": web_url,
                             "prompt": prompt,
                             "genre": genre,
+                            "format": format,
                             "elapsed": elapsed,
                             "cached": False,
                         }
@@ -345,9 +381,10 @@ class ImageGenerator:
             logger.error(f"❌ 이미지 생성 실패: {scene_id}")
             return {
                 "success": False, "path": "", "url": "",
-                "prompt": prompt, "genre": genre,
+                "prompt": prompt, "genre": genre, "format": format,
                 "elapsed": elapsed, "cached": False,
             }
+
 
     @staticmethod
     def extract_prompts(script_text: str) -> list[dict]:
@@ -443,6 +480,7 @@ class ImageGenerator:
             result = await self.generate(
                 item["prompt"], script_id=script_id,
                 scene_id=item["scene_id"], genre=genre,
+                format=format,          # ← 추가
                 model=model, seed=seed,
             )
             results.append(result)
