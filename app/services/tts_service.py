@@ -13,6 +13,11 @@ import edge_tts
 
 logger = logging.getLogger(__name__)
 
+# [번역 주석: 화산파=Mount Hua Sect, ...]
+TRANSLATION_NOTE_PATTERN = re.compile(
+    r'\[번역\s*주석[^\]]*\]',
+    re.IGNORECASE
+)
 
 @dataclass
 class Voice:
@@ -252,9 +257,8 @@ class TTSService:
     @staticmethod
     def _extract_narration(script: str) -> str:
         """스크립트에서 나레이션 텍스트만 추출
-        — 제어문([HOOK], [SCENE], [PROBLEM - 3~10초] 등),
-          프롬프트([이미지 프롬프트:], [BGM:], [SFX:] 등),
-          볼드 태그(**[...]**), 시간 표기, 영어 주석 모두 제거
+        — 제어문, 프롬프트 태그, 번역 주석, 괄호 영어 설명, 시간 표기 모두 제거
+        — TTS가 읽을 순수 한국어 나레이션만 반환
         """
         lines = script.split('\n')
         narration_lines = []
@@ -268,32 +272,45 @@ class TTSService:
             if BOLD_TAG_PATTERN.match(stripped):
                 continue
 
-            # 2) 제어문 태그 제거: [HOOK - 0:00~0:05], [PROBLEM - 3~10초], [CTA - 마지막 3초]
+            # 2) 제어문 태그 제거: [HOOK - 0:00~0:05], [PROBLEM - 3~10초] 등
             stripped = CONTROL_TAG_PATTERN.sub('', stripped)
 
-            # 3) 프롬프트 태그가 포함된 줄 전체 스킵 (태그가 줄의 대부분인 경우)
+            # 3) 프롬프트 태그가 포함된 줄 전체 스킵
             if PROMPT_TAG_PATTERN.search(line):
                 continue
 
-            # 4) 마크다운 헤더 스킵
+            # 4) 번역 주석 태그가 포함된 줄 전체 스킵
+            if TRANSLATION_NOTE_PATTERN.search(line):
+                continue
+
+            # 5) 마크다운 헤더 스킵
             if stripped.startswith('#'):
                 continue
 
-            # 5) 시간만 있는 줄 스킵
+            # 6) 시간만 있는 줄 스킵
             if TIME_ONLY_PATTERN.match(stripped):
                 continue
 
-            # 6) 괄호 안 영어 설명 제거: (Hidden Master), (Martial Arts) 등
-            cleaned = re.sub(r'\([A-Za-z][A-Za-z\s,\'\.~\-]*\)', '', stripped)
+            # 7) 괄호 안 영어 설명 제거 (다양한 패턴)
+            #    화산파(Mount Hua Sect) → 화산파
+            #    매화검법(Plum Blossom Sword Art) → 매화검법
+            #    (Hidden Master) → 제거
+            #    일반 괄호 한국어는 유지: (웃으며), (소리치며)
+            cleaned = re.sub(r'\([A-Za-z][A-Za-z\s,\'\.~\-:;/&]*\)', '', stripped)
+            # 혼합형 괄호도 제거: (Mount Hua 화산)
+            cleaned = re.sub(r'\([A-Za-z][^\)]*[A-Za-z]\)', '', cleaned)
             cleaned = cleaned.replace('()', '')
 
-            # 7) Midjourney 파라미터 제거: --ar 16:9, --v 5.2
+            # 8) Midjourney 파라미터 제거: --ar 16:9, --v 5.2
             cleaned = re.sub(r'--\w+\s+\S+', '', cleaned)
 
-            # 8) 연속 공백 정리
+            # 9) 인라인 태그 잔여물 제거: [BGM: xxx] 등이 줄 중간에 있을 수 있음
+            cleaned = re.sub(r'\[[^\]]*\]', '', cleaned)
+
+            # 10) 연속 공백 정리
             cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
 
-            # 9) 너무 짧으면 스킵 (제어문만 있던 줄)
+            # 11) 너무 짧으면 스킵
             if len(cleaned) < 2:
                 continue
 
@@ -302,6 +319,7 @@ class TTSService:
         result = '\n'.join(narration_lines)
         logger.debug(f"[나레이션 추출] 원문 {len(script)}자 → 추출 {len(result)}자")
         return result
+
 
     # ──────────────────────────────────────────────
     # 씬별 나레이션 분리 (숏츠/롱폼 공용)

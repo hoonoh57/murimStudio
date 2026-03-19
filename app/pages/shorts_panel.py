@@ -1,11 +1,11 @@
-"""숏츠 제작 UI 패널"""
+"""숏츠 제작 UI 패널 (v1.7.1 — 클라이언트 안전 처리 + 씬 기반 파이프라인)"""
 
 import os
 import re
 import sqlite3
 import logging
 from pathlib import Path
-from nicegui import ui
+from nicegui import ui, context
 from app.services.shorts_maker import ShortsMaker, ShortsScene, SHORTS_DIR, MAX_DURATION
 from app.services.image_generator import ImageGenerator
 from app.services.tts_service import TTSService
@@ -30,6 +30,17 @@ def _normalize_images(raw_imgs, script_id):
     return result
 
 
+def _safe_ui(fn, *args, **kwargs):
+    """NiceGUI UI 호출 시 클라이언트 삭제 여부를 체크하여 안전하게 실행"""
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as e:
+        if 'deleted' in str(e):
+            logger.warning(f"[UI] 클라이언트 이탈 — UI 업데이트 스킵: {fn.__name__}")
+            return None
+        raise
+
+
 def create():
     ui.label("🎬 YouTube Shorts 제작기").classes("text-2xl font-bold")
     ui.label("15~59초 세로영상 | Ken Burns 효과 | 자막 자동 생성").classes("text-gray-400 mb-4")
@@ -43,7 +54,7 @@ def create():
 **루프 구조** — 끝→시작이 자연스러우면 재시청 유도  
         """)
 
-    state = {"script_id": None, "images": [], "narration": ""}
+    state = {"script_id": None, "images": [], "narration": "", "script_content": ""}
 
     # === 1. 스크립트 선택 ===
     ui.label("① 스크립트 선택").classes("text-lg font-bold mt-4")
@@ -51,7 +62,9 @@ def create():
     try:
         conn = sqlite3.connect(DB_PATH)
         rows = conn.execute("""
-            SELECT s.id, COALESCE(p.title, '제목없음'), s.language, LENGTH(s.content)
+            SELECT s.id, COALESCE(p.title, '제목없음') as title, s.language,
+                   LENGTH(s.content), COALESCE(s.format, 'long') as format,
+                   COALESCE(s.genre, 'neutral') as genre
             FROM scripts s LEFT JOIN projects p ON s.project_id = p.id
             WHERE s.content IS NOT NULL AND LENGTH(s.content) > 0
             ORDER BY s.id DESC
@@ -62,10 +75,12 @@ def create():
 
     generator = ImageGenerator()
     script_options = {}
-    for sid, title, lang, clen in rows:
+    for row in rows:
+        sid, title, lang, clen, fmt, genre = row
         imgs = generator.get_images_for_script(sid)
         img_badge = f"🖼️{len(imgs)}" if imgs else "🖼️0"
-        label = f"[ID:{sid}] {title} ({lang}) {img_badge}"
+        fmt_badge = "📱" if fmt == "shorts" else "🎬"
+        label = f"[ID:{sid}] {fmt_badge} {title} ({lang}/{genre}) {img_badge}"
         script_options[label] = sid
 
     script_select = ui.select(
@@ -105,6 +120,9 @@ def create():
     ).classes("w-full").props("rows=6")
     subtitle_preview = ui.label("").classes("text-sm text-gray-400")
 
+    # === 3-1. 씬 정보 미리보기 ===
+    scene_info_label = ui.label("").classes("text-sm text-blue-300 mt-1")
+
     # === 4. 이미지 선택 ===
     ui.label("④ 이미지 선택").classes("text-lg font-bold mt-4")
     image_container = ui.row().classes("flex-wrap gap-2")
@@ -118,7 +136,6 @@ def create():
 
     # === 스크립트 선택 이벤트 ===
     async def on_script_select(e):
-        # e.args는 dict {'value': ..., 'label': ...}
         if isinstance(e.args, dict):
             val = e.args.get("label", "")
         elif isinstance(e.args, str):
@@ -167,7 +184,11 @@ def create():
             row = conn.execute("SELECT content FROM scripts WHERE id=?", (sid,)).fetchone()
             conn.close()
             if row:
-                narration = TTSService._extract_narration(row[0])
+                content = row[0]
+                state["script_content"] = content
+
+                # 나레이션 추출 (제어문 완전 제거)
+                narration = TTSService._extract_narration(content)
                 limit = int(max_chars.value)
                 if len(narration) > limit:
                     sentences = re.split(r'(?<=[.!?。])\s*', narration)
@@ -186,13 +207,30 @@ def create():
                 subtitle_preview.set_text(
                     f"📝 {len(narration)}자 | 자막 {len(lines)}줄 | 예상 {est_duration:.0f}초"
                 )
+
+                # 씬 분석 정보 표시
+                scenes = TTSService.extract_scenes(content)
+                if scenes:
+                    scene_parts = []
+                    for sc in scenes:
+                        parts = [sc["section"]]
+                        if sc["image_prompt"]:
+                            parts.append("🖼️")
+                        if sc["bgm"]:
+                            parts.append("🎵")
+                        if sc["sfx"]:
+                            parts.append("🔊")
+                        scene_parts.append("".join(parts))
+                    scene_info_label.set_text(
+                        f"🎬 씬 구조: {' → '.join(scene_parts)} ({len(scenes)}씬)"
+                    )
+                else:
+                    scene_info_label.set_text("")
+
         except Exception as ex:
             logger.error(f"나레이션 추출 실패: {ex}")
 
-    # ★★★ 이 줄이 on_script_select 함수 바깥에 있어야 함 ★★★
     script_select.on("update:model-value", on_script_select)
-
-
 
     # === 6. 제작 버튼 ===
     ui.label("⑥ 숏츠 제작").classes("text-lg font-bold mt-4")
@@ -203,38 +241,47 @@ def create():
     result_container = ui.column().classes("w-full")
 
     async def generate_shorts():
+        """숏츠 생성 — 클라이언트 삭제 시에도 백그라운드 작업은 계속 진행"""
         if not state["images"]:
-            ui.notify("이미지가 없습니다!", type="warning")
+            _safe_ui(ui.notify, "이미지가 없습니다!", type="warning")
             return
 
         narration = narration_area.value.strip()
         if not narration or len(narration) < 10:
-            ui.notify("나레이션을 입력하세요!", type="warning")
+            _safe_ui(ui.notify, "나레이션을 입력하세요!", type="warning")
             return
 
-        progress.visible = True
-        progress.value = 0.1
-        status_label.set_text("🔊 TTS 생성 중...")
+        # 제작에 필요한 값을 미리 로컬 변수로 저장 (UI 접근 최소화)
+        script_id = state["script_id"]
+        images = list(state["images"])
+        voice_id = voice_select.value
+        rate = rate_select.value
+        effects = [sel.value for sel in effect_selectors] if effect_selectors else None
+
+        _safe_ui(setattr, progress, 'visible', True)
+        _safe_ui(setattr, progress, 'value', 0.1)
+        _safe_ui(status_label.set_text, "🔊 TTS 생성 중...")
 
         try:
-            tts_filename = f"shorts_script_{state['script_id']}.mp3"
+            # ── 1. TTS 생성 ──
+            tts_filename = f"shorts_script_{script_id}.mp3"
             tts_result = await TTSService.generate(
                 text=narration,
-                voice_id=voice_select.value,
-                rate=rate_select.value,
+                voice_id=voice_id,
+                rate=rate,
                 pitch="+0Hz",
                 output_filename=tts_filename
             )
             audio_path = tts_result["path"]
             audio_duration = await ShortsMaker.get_audio_duration(audio_path)
+            if audio_duration <= 0:
+                audio_duration = tts_result.get("duration_sec", 30)
 
-            progress.value = 0.3
-            status_label.set_text(f"🎬 Ken Burns 클립 생성 중... ({audio_duration:.1f}초)")
+            _safe_ui(setattr, progress, 'value', 0.3)
+            _safe_ui(status_label.set_text, f"🎬 Ken Burns 클립 생성 중... ({audio_duration:.1f}초)")
 
-            images = state["images"]
+            # ── 2. 씬별 클립 생성 ──
             per_image = audio_duration / len(images)
-            effects = [sel.value for sel in effect_selectors] if effect_selectors else None
-
             clip_paths = []
             for i, img_path in enumerate(images):
                 eff = effects[i] if effects and i < len(effects) else "zoom_center"
@@ -247,16 +294,19 @@ def create():
                 )
                 if success:
                     clip_paths.append(clip_path)
-                progress.value = 0.3 + (0.4 * (i + 1) / len(images))
-                status_label.set_text(f"🎬 씬 {i + 1}/{len(images)} 완료")
+
+                pct = 0.3 + (0.4 * (i + 1) / len(images))
+                _safe_ui(setattr, progress, 'value', pct)
+                _safe_ui(status_label.set_text, f"🎬 씬 {i + 1}/{len(images)} 완료")
 
             if not clip_paths:
-                ui.notify("클립 생성 실패!", type="negative")
-                progress.visible = False
+                _safe_ui(ui.notify, "클립 생성 실패!", type="negative")
+                _safe_ui(setattr, progress, 'visible', False)
                 return
 
-            progress.value = 0.7
-            status_label.set_text("📝 자막 생성 중...")
+            # ── 3. 자막 생성 ──
+            _safe_ui(setattr, progress, 'value', 0.7)
+            _safe_ui(status_label.set_text, "📝 자막 생성 중...")
 
             subtitle_lines = ShortsMaker.split_narration_to_subtitle(narration)
             lines_per_scene = max(1, len(subtitle_lines) // len(images))
@@ -273,13 +323,14 @@ def create():
                     effect=effects[i] if effects and i < len(effects) else "zoom_center"
                 ))
 
-            ass_path = str(SHORTS_DIR / f"shorts_script_{state['script_id']}.ass")
+            ass_path = str(SHORTS_DIR / f"shorts_script_{script_id}.ass")
             ShortsMaker.generate_ass_subtitle(scene_objs, ass_path)
 
-            progress.value = 0.8
-            status_label.set_text("🔗 최종 조립 중...")
+            # ── 4. 최종 조립 ──
+            _safe_ui(setattr, progress, 'value', 0.8)
+            _safe_ui(status_label.set_text, "🔗 최종 조립 중...")
 
-            output_name = f"shorts_script_{state['script_id']}.mp4"
+            output_name = f"shorts_script_{script_id}.mp4"
             output_path = str(SHORTS_DIR / output_name)
             result = await ShortsMaker.assemble_shorts(
                 scene_clips=clip_paths,
@@ -288,40 +339,56 @@ def create():
                 output_path=output_path,
             )
 
+            # ── 5. 임시 파일 정리 ──
             for clip in clip_paths:
                 try:
                     os.remove(clip)
                 except Exception:
                     pass
 
-            progress.value = 1.0
+            _safe_ui(setattr, progress, 'value', 1.0)
 
+            # ── 6. 결과 표시 ──
             if result["success"]:
-                status_label.set_text(
+                logger.info(
+                    f"[숏츠 완성] script={script_id}, "
+                    f"{result['duration']:.1f}s, {result['file_size']/1024/1024:.1f}MB"
+                )
+                _safe_ui(
+                    status_label.set_text,
                     f"✅ 완성! {result['duration']:.1f}초 | "
                     f"{result['file_size'] / 1024 / 1024:.1f}MB"
                 )
-                ui.notify("숏츠 제작 완료!", type="positive")
-                result_container.clear()
-                with result_container:
-                    with ui.card().classes("w-full p-4"):
-                        ui.label("🎬 완성된 숏츠").classes("text-lg font-bold")
-                        ui.video(result["url"]).classes("w-80")
-                        with ui.row().classes("gap-4 mt-2"):
-                            ui.label(f"⏱️ {result['duration']:.1f}초")
-                            ui.label(f"📦 {result['file_size'] / 1024 / 1024:.1f}MB")
-                            ui.label(f"🖼️ {result['scenes']}장면")
-                        ui.label(f"📂 {result['path']}").classes("text-xs text-gray-400")
+                _safe_ui(ui.notify, "숏츠 제작 완료!", type="positive")
+
+                try:
+                    result_container.clear()
+                    with result_container:
+                        with ui.card().classes("w-full p-4"):
+                            ui.label("🎬 완성된 숏츠").classes("text-lg font-bold")
+                            ui.video(result["url"]).classes("w-80")
+                            with ui.row().classes("gap-4 mt-2"):
+                                ui.label(f"⏱️ {result['duration']:.1f}초")
+                                ui.label(f"📦 {result['file_size'] / 1024 / 1024:.1f}MB")
+                                ui.label(f"🖼️ {result['scenes']}장면")
+                            ui.label(f"📂 {result['path']}").classes("text-xs text-gray-400")
+                except RuntimeError:
+                    pass  # 클라이언트 이탈
             else:
-                status_label.set_text(f"❌ 실패: {result.get('error', '알 수 없는 오류')}")
-                ui.notify("숏츠 제작 실패", type="negative")
+                err_msg = result.get('error', '알 수 없는 오류')
+                logger.error(f"[숏츠 실패] {err_msg}")
+                _safe_ui(status_label.set_text, f"❌ 실패: {err_msg}")
+                _safe_ui(ui.notify, "숏츠 제작 실패", type="negative")
 
         except Exception as e:
-            logger.error(f"숏츠 제작 에러: {e}")
-            status_label.set_text(f"❌ 에러: {e}")
-            ui.notify(str(e), type="negative")
+            logger.error(f"숏츠 제작 에러: {e}", exc_info=True)
+            _safe_ui(status_label.set_text, f"❌ 에러: {e}")
+            try:
+                ui.notify(str(e), type="negative")
+            except RuntimeError:
+                pass
         finally:
-            progress.visible = False
+            _safe_ui(setattr, progress, 'visible', False)
 
     ui.button(
         "🎬 숏츠 제작 시작",
