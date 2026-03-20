@@ -617,21 +617,15 @@ class VideoClipService:
     def build_motion_prompt(
         base_prompt: str,
         genre: str = "default",
-        motion_type: str | None = None,
+        scene_index: int = 0,
     ) -> str:
-        """이미지 프롬프트 + 장르 모션 → 비디오 프롬프트 생성"""
-        preset = MOTION_PRESETS.get(genre, MOTION_PRESETS["default"])
-        motions = preset["motions"]
-
-        if motion_type and motion_type in motions:
-            motion = motion_type
+        preset = MOTION_PRESETS.get(genre, MOTION_PRESETS.get("default", []))
+        if isinstance(preset, list):
+            motions = preset
+        elif isinstance(preset, dict):
+            motions = preset.get("motions", ["slow zoom in"])
         else:
-            motion = random.choice(motions) if motions else "slow zoom in"
+            motions = ["slow zoom in"]
+        motion = motions[scene_index % len(motions)] if motions else "slow zoom in"
+        return f"{base_prompt}, {motion}, cinematic, smooth motion"
 
-        video_prompt = f"{base_prompt}, {motion}, cinematic, smooth motion"
-
-        style_suffix = preset.get("style", "")
-        if style_suffix:
-            video_prompt += f", {style_suffix}"
-
-        return video_prompt
