@@ -1,4 +1,4 @@
-"""숏츠 제작 UI 패널 (v1.7.1 — 클라이언트 안전 처리 + 씬 기반 파이프라인)"""
+"""숏츠 제작 UI 패널 (v1.8.0 — AI 비디오 클립 + Ken Burns 10종 + 효과 확장)"""
 
 import os
 import re
@@ -43,7 +43,7 @@ def _safe_ui(fn, *args, **kwargs):
 
 def create():
     ui.label("🎬 YouTube Shorts 제작기").classes("text-2xl font-bold")
-    ui.label("15~59초 세로영상 | Ken Burns 효과 | 자막 자동 생성").classes("text-gray-400 mb-4")
+    ui.label("15~59초 세로영상 | AI 비디오 클립 + Ken Burns | 자막 자동 생성").classes("text-gray-400 mb-4")
 
     with ui.expansion("💡 2026 숏츠 알고리즘 핵심 팁", icon="tips_and_updates").classes("w-full mb-4"):
         ui.markdown("""
@@ -52,9 +52,17 @@ def create():
 **자막 필수** — 무음 시청자 70% 이상  
 **결과부터 보여주기** — 질문/충격/결과 먼저 → 설명은 뒤에  
 **루프 구조** — 끝→시작이 자연스러우면 재시청 유도  
+**AI 클립 사용 시** — 정적 슬라이드쇼를 벗어나 YouTube AI slop 판정 탈출!
         """)
 
-    state = {"script_id": None, "images": [], "narration": "", "script_content": ""}
+    state = {
+        "script_id": None,
+        "images": [],
+        "narration": "",
+        "script_content": "",
+        "genre": "neutral",
+        "image_prompts": [],
+    }
 
     # === 1. 스크립트 선택 ===
     ui.label("① 스크립트 선택").classes("text-lg font-bold mt-4")
@@ -75,6 +83,7 @@ def create():
 
     generator = ImageGenerator()
     script_options = {}
+    script_genres = {}
     for row in rows:
         sid, title, lang, clen, fmt, genre = row
         imgs = generator.get_images_for_script(sid)
@@ -82,6 +91,7 @@ def create():
         fmt_badge = "📱" if fmt == "shorts" else "🎬"
         label = f"[ID:{sid}] {fmt_badge} {title} ({lang}/{genre}) {img_badge}"
         script_options[label] = sid
+        script_genres[sid] = genre or "neutral"
 
     script_select = ui.select(
         options=list(script_options.keys()),
@@ -112,6 +122,27 @@ def create():
             label="속도 (숏츠는 빠르게)"
         ).classes("w-32")
 
+    # === 2-1. AI 비디오 클립 설정 (신규) ===
+    ui.separator().classes("my-2")
+    with ui.row().classes("gap-4 items-center"):
+        ai_clip_toggle = ui.switch("🎬 AI 비디오 클립 사용", value=False).classes("text-lg")
+        ui.label("정적 이미지→움직이는 영상 변환 (AI slop 탈출)").classes("text-gray-400 text-sm")
+
+    with ui.row().classes("gap-4 items-end").bind_visibility_from(ai_clip_toggle, "value"):
+        from app.services.video_clip_service import VideoClipService
+        model_options = {m["key"]: f'{m["name"]} (${m["cost"]}/s)' for m in VideoClipService.get_model_list()}
+        ai_model_select = ui.select(
+            options=model_options,
+            value="wan",
+            label="AI 비디오 모델"
+        ).classes("w-64")
+        ai_duration_select = ui.select(
+            options={"3": "3초 (빠름)", "4": "4초 (권장)", "5": "5초 (고품질)"},
+            value="4",
+            label="클립 길이"
+        ).classes("w-40")
+        ui.label("⚠️ API 비용 발생 | 실패 시 자동 Ken Burns 폴백").classes("text-orange-300 text-xs")
+
     # === 3. 나레이션 편집 ===
     ui.label("③ 나레이션 편집").classes("text-lg font-bold mt-4")
     narration_area = ui.textarea(
@@ -130,7 +161,7 @@ def create():
 
     # === 5. Ken Burns 효과 ===
     ui.label("⑤ Ken Burns 효과").classes("text-lg font-bold mt-4")
-    effect_info = ui.label("이미지 선택 후 효과를 지정하세요").classes("text-gray-400")
+    effect_info = ui.label("이미지 선택 후 효과를 지정하세요 (AI 클립 모드에서는 폴백용)").classes("text-gray-400")
     effect_container = ui.column().classes("w-full gap-1")
     effect_selectors = []
 
@@ -148,6 +179,7 @@ def create():
 
         sid = script_options[val]
         state["script_id"] = sid
+        state["genre"] = script_genres.get(sid, "neutral")
 
         raw = generator.get_images_for_script(sid)
         imgs = _normalize_images(raw, sid)
@@ -165,10 +197,9 @@ def create():
                         ui.image(img["url"]).classes("w-24 h-32 object-cover rounded")
                         ui.label(img["name"]).classes("text-xs text-center")
 
-            effects_list = ["zoom_center", "zoom_top", "pan_left", "zoom_out", "pan_right"]
             with effect_container:
                 for i, img in enumerate(imgs):
-                    auto_eff = effects_list[i % len(effects_list)]
+                    auto_eff = ShortsMaker.AUTO_EFFECTS[i % len(ShortsMaker.AUTO_EFFECTS)]
                     sel = ui.select(
                         options={k: v["desc"] for k, v in ShortsMaker.EFFECTS.items()},
                         value=auto_eff,
@@ -187,7 +218,6 @@ def create():
                 content = row[0]
                 state["script_content"] = content
 
-                # 나레이션 추출 (제어문 완전 제거)
                 narration = TTSService._extract_narration(content)
                 limit = int(max_chars.value)
                 if len(narration) > limit:
@@ -208,7 +238,10 @@ def create():
                     f"📝 {len(narration)}자 | 자막 {len(lines)}줄 | 예상 {est_duration:.0f}초"
                 )
 
-                # 씬 분석 정보 표시
+                # 이미지 프롬프트 추출 (AI 클립용)
+                prompts = generator.extract_prompts(content)
+                state["image_prompts"] = [p["prompt"] for p in prompts]
+
                 scenes = TTSService.extract_scenes(content)
                 if scenes:
                     scene_parts = []
@@ -238,10 +271,11 @@ def create():
     progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
     progress.visible = False
     status_label = ui.label("").classes("text-sm")
+    cost_label = ui.label("").classes("text-sm text-orange-300")
     result_container = ui.column().classes("w-full")
 
     async def generate_shorts():
-        """숏츠 생성 — 클라이언트 삭제 시에도 백그라운드 작업은 계속 진행"""
+        """숏츠 생성 — AI 클립 또는 Ken Burns"""
         if not state["images"]:
             _safe_ui(ui.notify, "이미지가 없습니다!", type="warning")
             return
@@ -251,16 +285,22 @@ def create():
             _safe_ui(ui.notify, "나레이션을 입력하세요!", type="warning")
             return
 
-        # 제작에 필요한 값을 미리 로컬 변수로 저장 (UI 접근 최소화)
         script_id = state["script_id"]
         images = list(state["images"])
         voice_id = voice_select.value
         rate = rate_select.value
         effects = [sel.value for sel in effect_selectors] if effect_selectors else None
+        use_ai = ai_clip_toggle.value
+        genre = state.get("genre", "neutral")
+        img_prompts = state.get("image_prompts", [])
 
+        mode_text = "AI 비디오 클립" if use_ai else "Ken Burns"
         _safe_ui(setattr, progress, 'visible', True)
         _safe_ui(setattr, progress, 'value', 0.1)
-        _safe_ui(status_label.set_text, "🔊 TTS 생성 중...")
+        _safe_ui(status_label.set_text, f"🔊 TTS 생성 중... (모드: {mode_text})")
+        _safe_ui(cost_label.set_text, "")
+
+        total_cost = 0.0
 
         try:
             # ── 1. TTS 생성 ──
@@ -278,31 +318,152 @@ def create():
                 audio_duration = tts_result.get("duration_sec", 30)
 
             _safe_ui(setattr, progress, 'value', 0.3)
-            _safe_ui(status_label.set_text, f"🎬 Ken Burns 클립 생성 중... ({audio_duration:.1f}초)")
 
             # ── 2. 씬별 클립 생성 ──
-            per_image = audio_duration / len(images)
+            per_image = audio_duration / max(len(images), 1)
             clip_paths = []
-            for i, img_path in enumerate(images):
-                eff = effects[i] if effects and i < len(effects) else "zoom_center"
-                clip_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
-                success = await ShortsMaker.create_scene_clip(
-                    image_path=img_path,
-                    duration=per_image,
-                    effect=eff,
-                    output_path=clip_path
-                )
-                if success:
-                    clip_paths.append(clip_path)
+            total_cost = 0.0
 
-                pct = 0.3 + (0.4 * (i + 1) / len(images))
-                _safe_ui(setattr, progress, 'value', pct)
-                _safe_ui(status_label.set_text, f"🎬 씬 {i + 1}/{len(images)} 완료")
+            if use_ai:
+                # ── AI 비디오 클립 모드 ──
+                selected_model = ai_model_select.value if ai_model_select else "wan"
+                clip_dur = int(ai_duration_select.value) if ai_duration_select else 4
+                _safe_ui(status_label.set_text, f"🎬 AI 비디오 클립 생성 중... ({selected_model})")
+
+                from app.services.video_clip_service import VideoClipService
+                clip_service = VideoClipService()
+
+                try:
+                    for i, img_path in enumerate(images):
+                        # 프롬프트 생성 (안전 처리)
+                        raw_prompt = ""
+                        if img_prompts and i < len(img_prompts) and img_prompts[i]:
+                            raw_prompt = str(img_prompts[i])
+                        if not raw_prompt.strip():
+                            raw_prompt = "cinematic scene"
+
+                        prompt = VideoClipService.build_motion_prompt(
+                            raw_prompt, genre or "default", i
+                        )
+
+                        try:
+                            result = await clip_service.generate_clip(
+                                image_path=img_path,
+                                prompt=prompt,
+                                script_id=str(script_id),
+                                scene_id=f"scene_{i:02d}",
+                                genre=genre or "default",
+                                fmt="shorts",
+                                duration=clip_dur,
+                                model=selected_model,
+                            )
+                        except Exception as clip_err:
+                            logger.error(f"❌ AI 클립 생성 예외 scene_{i}: {clip_err}")
+                            result = {"success": False}
+
+                        if result.get("success"):
+                            clip_paths.append(result["path"])
+                            total_cost += result.get("cost", 0.0)
+                            model_used = result.get("model", "ken-burns")
+                            _safe_ui(
+                                status_label.set_text,
+                                f"🎬 AI 클립 {i+1}/{len(images)} 완료 ({model_used})"
+                            )
+                        else:
+                            # ── AI 전부 실패 → Ken Burns 폴백 ──
+                            logger.warning(f"⚠️ AI 실패 scene_{i} → Ken Burns 폴백")
+                            _safe_ui(
+                                status_label.set_text,
+                                f"⚠️ AI 실패 → Ken Burns 폴백 {i+1}/{len(images)}"
+                            )
+                            eff = "zoom_center"
+                            if effects and i < len(effects):
+                                eff = effects[i]
+
+                            kb_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
+                            try:
+                                kb_ok = await ShortsMaker.create_scene_clip(
+                                    image_path=img_path,
+                                    duration=per_image,
+                                    effect=eff,
+                                    output_path=kb_path,
+                                )
+                                if kb_ok:
+                                    clip_paths.append(kb_path)
+                                    logger.info(f"✅ Ken Burns 폴백 성공: scene_{i}")
+                                else:
+                                    logger.error(f"❌ Ken Burns도 실패: scene_{i}")
+                            except Exception as kb_err:
+                                logger.error(f"❌ Ken Burns 폴백 예외 scene_{i}: {kb_err}")
+
+                        pct = 0.3 + (0.4 * (i + 1) / len(images))
+                        _safe_ui(setattr, progress, 'value', pct)
+                        if hasattr(cost_label, 'set_text'):
+                            _safe_ui(
+                                cost_label.set_text,
+                                f"💰 현재 비용: ${total_cost:.3f}"
+                            )
+
+                except Exception as batch_err:
+                    logger.error(f"❌ AI 클립 배치 에러: {batch_err}")
+                    _safe_ui(status_label.set_text, f"⚠️ AI 클립 에러 → Ken Burns로 전환")
+
+                    # 배치 레벨 에러 시 아직 안 만든 클립을 Ken Burns로 생성
+                    for i, img_path in enumerate(images):
+                        already = any(f"clip_{i:02d}" in str(p) for p in clip_paths)
+                        if already:
+                            continue
+                        eff = effects[i] if effects and i < len(effects) else "zoom_center"
+                        kb_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
+                        try:
+                            kb_ok = await ShortsMaker.create_scene_clip(
+                                image_path=img_path,
+                                duration=per_image,
+                                effect=eff,
+                                output_path=kb_path,
+                            )
+                            if kb_ok:
+                                clip_paths.append(kb_path)
+                        except Exception:
+                            pass
+
+                finally:
+                    try:
+                        await clip_service.close()
+                    except Exception:
+                        pass
+
+            else:
+                # ── Ken Burns 모드 (기존) ──
+                _safe_ui(status_label.set_text, "🎬 Ken Burns 클립 생성 중...")
+                for i, img_path in enumerate(images):
+                    eff = "zoom_center"
+                    if effects and i < len(effects):
+                        eff = effects[i]
+
+                    clip_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
+                    try:
+                        success = await ShortsMaker.create_scene_clip(
+                            image_path=img_path,
+                            duration=per_image,
+                            effect=eff,
+                            output_path=clip_path,
+                        )
+                        if success:
+                            clip_paths.append(clip_path)
+                    except Exception as e:
+                        logger.error(f"❌ Ken Burns 클립 에러 scene_{i}: {e}")
+
+                    pct = 0.3 + (0.4 * (i + 1) / len(images))
+                    _safe_ui(setattr, progress, 'value', pct)
+                    _safe_ui(status_label.set_text, f"🎬 씬 {i+1}/{len(images)} 완료")
 
             if not clip_paths:
-                _safe_ui(ui.notify, "클립 생성 실패!", type="negative")
+                _safe_ui(ui.notify, "❌ 클립 생성 실패! 이미지를 확인하세요.", type="negative")
                 _safe_ui(setattr, progress, 'visible', False)
+                _safe_ui(status_label.set_text, "클립 생성 실패")
                 return
+
 
             # ── 3. 자막 생성 ──
             _safe_ui(setattr, progress, 'value', 0.7)
@@ -339,27 +500,30 @@ def create():
                 output_path=output_path,
             )
 
-            # ── 5. 임시 파일 정리 ──
-            for clip in clip_paths:
-                try:
-                    os.remove(clip)
-                except Exception:
-                    pass
+            # ── 5. 임시 클립 정리 (Ken Burns만, AI 클립은 캐시) ──
+            if not use_ai:
+                for clip in clip_paths:
+                    try:
+                        os.remove(clip)
+                    except Exception:
+                        pass
 
             _safe_ui(setattr, progress, 'value', 1.0)
 
             # ── 6. 결과 표시 ──
             if result["success"]:
+                cost_text = f" | 💰 ${total_cost:.3f}" if total_cost > 0 else ""
                 logger.info(
-                    f"[숏츠 완성] script={script_id}, "
-                    f"{result['duration']:.1f}s, {result['file_size']/1024/1024:.1f}MB"
+                    f"[숏츠 완성] script={script_id}, mode={mode_text}, "
+                    f"{result['duration']:.1f}s, {result['file_size']/1024/1024:.1f}MB{cost_text}"
                 )
                 _safe_ui(
                     status_label.set_text,
                     f"✅ 완성! {result['duration']:.1f}초 | "
-                    f"{result['file_size'] / 1024 / 1024:.1f}MB"
+                    f"{result['file_size'] / 1024 / 1024:.1f}MB | "
+                    f"모드: {mode_text}{cost_text}"
                 )
-                _safe_ui(ui.notify, "숏츠 제작 완료!", type="positive")
+                _safe_ui(ui.notify, f"숏츠 제작 완료! ({mode_text})", type="positive")
 
                 try:
                     result_container.clear()
@@ -371,9 +535,12 @@ def create():
                                 ui.label(f"⏱️ {result['duration']:.1f}초")
                                 ui.label(f"📦 {result['file_size'] / 1024 / 1024:.1f}MB")
                                 ui.label(f"🖼️ {result['scenes']}장면")
+                                ui.label(f"🎬 {mode_text}")
+                                if total_cost > 0:
+                                    ui.label(f"💰 ${total_cost:.3f}").classes("text-orange-300")
                             ui.label(f"📂 {result['path']}").classes("text-xs text-gray-400")
                 except RuntimeError:
-                    pass  # 클라이언트 이탈
+                    pass
             else:
                 err_msg = result.get('error', '알 수 없는 오류')
                 logger.error(f"[숏츠 실패] {err_msg}")
@@ -390,11 +557,13 @@ def create():
         finally:
             _safe_ui(setattr, progress, 'visible', False)
 
-    ui.button(
-        "🎬 숏츠 제작 시작",
-        on_click=generate_shorts,
-        color="red"
-    ).classes("mt-2").props("size=lg")
+    with ui.row().classes("gap-4 items-center mt-2"):
+        ui.button(
+            "🎬 숏츠 제작 시작",
+            on_click=generate_shorts,
+            color="red"
+        ).props("size=lg")
+        ui.label("AI 클립 ON: Pollinations API 호출 | OFF: 기존 Ken Burns").classes("text-xs text-gray-400")
 
     # === 기존 숏츠 목록 ===
     ui.label("📁 제작된 숏츠").classes("text-lg font-bold mt-6")

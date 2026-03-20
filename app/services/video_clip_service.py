@@ -149,15 +149,32 @@ class VideoClipService:
 
     @staticmethod
     def build_motion_prompt(
-        image_prompt: str,
+        base_prompt: str,
         genre: str = "default",
         scene_index: int = 0,
     ) -> str:
-        """이미지 프롬프트 + 장르별 모션 힌트 → 비디오 프롬프트"""
-        presets = MOTION_PRESETS.get(genre, MOTION_PRESETS["default"])
-        motion = presets[scene_index % len(presets)]
-        scene_desc = image_prompt[:200].strip()
-        return f"{scene_desc}, {motion}, high quality cinematic video, smooth motion"
+        """이미지 프롬프트 + 장르 모션 → 비디오 프롬프트 생성"""
+        preset = MOTION_PRESETS.get(genre, MOTION_PRESETS.get("default", {}))
+
+        # preset이 list인 경우 (["slow zoom in", "pan left", ...])
+        if isinstance(preset, list):
+            motions = preset
+            style_suffix = ""
+        # preset이 dict인 경우 ({"motions": [...], "style": "..."})
+        elif isinstance(preset, dict):
+            motions = preset.get("motions", ["slow zoom in"])
+            style_suffix = preset.get("style", "")
+        else:
+            motions = ["slow zoom in"]
+            style_suffix = ""
+
+        motion = motions[scene_index % len(motions)] if motions else "slow zoom in"
+        video_prompt = f"{base_prompt}, {motion}, cinematic, smooth motion"
+
+        if style_suffix:
+            video_prompt += f", {style_suffix}"
+
+        return video_prompt
 
     # ── 핵심: 단일 클립 생성 ──────────────────────────
 
