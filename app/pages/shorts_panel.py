@@ -122,7 +122,7 @@ def create():
             label="속도 (숏츠는 빠르게)"
         ).classes("w-32")
 
-    # === 2-1. AI 비디오 클립 설정 (신규) ===
+    # === 2-1. AI 비디오 클립 설정 ===
     ui.separator().classes("my-2")
     with ui.row().classes("gap-4 items-center"):
         ai_clip_toggle = ui.switch("🎬 AI 비디오 클립 사용", value=False).classes("text-lg")
@@ -133,7 +133,7 @@ def create():
         model_options = {m["key"]: f'{m["name"]} (${m["cost"]}/s)' for m in VideoClipService.get_model_list()}
         ai_model_select = ui.select(
             options=model_options,
-            value="wan",
+            value="grok-imagine",
             label="AI 비디오 모델"
         ).classes("w-64")
         ai_duration_select = ui.select(
@@ -141,7 +141,9 @@ def create():
             value="4",
             label="클립 길이"
         ).classes("w-40")
-        ui.label("⚠️ API 비용 발생 | 실패 시 자동 Ken Burns 폴백").classes("text-orange-300 text-xs")
+        cost_label = ui.label("💰 현재 비용: $0.000").classes("text-yellow-300 text-sm")
+    with ui.row().classes("gap-2").bind_visibility_from(ai_clip_toggle, "value"):
+        ui.label("📌 Grok Imagine: $0.05/초 (월 $25 무료 크레딧) | 실패 시 자동 Ken Burns 폴백").classes("text-orange-300 text-xs")
 
     # === 3. 나레이션 편집 ===
     ui.label("③ 나레이션 편집").classes("text-lg font-bold mt-4")
