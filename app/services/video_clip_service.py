@@ -434,7 +434,7 @@ class VideoClipService:
                         logger.warning(f"⚠️ 폴링 에러: {e}")
                         continue
 
-                    if poll_resp.status_code != 200:
+                    if poll_resp.status_code not in (200, 202):
                         logger.warning(f"⚠️ 폴링 HTTP {poll_resp.status_code}")
                         continue
 
