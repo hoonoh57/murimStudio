@@ -1,4 +1,6 @@
-"""YouTube Shorts 제작기 – 9:16 세로 영상, Ken Burns, 자막 오버레이"""
+"""YouTube Shorts 제작기 – 9:16 세로 영상, Ken Burns / AI 비디오 클립, 자막 오버레이
+v1.8.0  2026-03-20 — AI 비디오 클립 모드 추가
+"""
 
 import os
 import re
@@ -27,16 +29,17 @@ class ShortsScene:
     """숏츠 한 장면"""
     image_path: str
     narration: str
-    duration: float = 0.0  # TTS 후 결정
+    duration: float = 0.0
     subtitle_lines: List[str] = field(default_factory=list)
-    effect: str = "zoom_center"  # zoom_center, zoom_top, pan_left, pan_right
+    effect: str = "zoom_center"
+    image_prompt: str = ""  # AI 클립 프롬프트용
 
 
 @dataclass
 class ShortsProject:
     """숏츠 프로젝트"""
     title: str
-    hook_text: str  # 첫 1.5초 텍스트
+    hook_text: str
     scenes: List[ShortsScene] = field(default_factory=list)
     bgm_path: Optional[str] = None
     output_filename: str = "short.mp4"
@@ -67,6 +70,26 @@ class ShortsMaker:
             "desc": "줌아웃 (전체 공개)",
             "filter": "zoompan=z='if(eq(on,1),1.3,max(zoom-0.0015,1))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps={fps}"
         },
+        "zoom_bottom": {
+            "desc": "하단 줌인",
+            "filter": "zoompan=z='min(zoom+0.0015,1.3)':x='iw/2-(iw/zoom/2)':y='ih-ih/zoom':d={frames}:s={w}x{h}:fps={fps}"
+        },
+        "pan_up": {
+            "desc": "하단→상단 패닝",
+            "filter": "zoompan=z='1.15':x='iw/2-(iw/zoom/2)':y='if(eq(on,1),ih-ih/zoom,max(y-1.5,0))':d={frames}:s={w}x{h}:fps={fps}"
+        },
+        "pan_down": {
+            "desc": "상단→하단 패닝",
+            "filter": "zoompan=z='1.15':x='iw/2-(iw/zoom/2)':y='if(eq(on,1),0,min(y+1.5,ih-ih/zoom))':d={frames}:s={w}x{h}:fps={fps}"
+        },
+        "diagonal_zoom": {
+            "desc": "대각선 줌인",
+            "filter": "zoompan=z='min(zoom+0.001,1.25)':x='if(eq(on,1),0,min(x+1,iw-iw/zoom))':y='if(eq(on,1),0,min(y+0.5,ih-ih/zoom))':d={frames}:s={w}x{h}:fps={fps}"
+        },
+        "zoom_out_reveal": {
+            "desc": "리빌 줌아웃",
+            "filter": "zoompan=z='if(eq(on,1),1.5,max(zoom-0.002,1))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps={fps}"
+        },
     }
 
     # 자막 스타일
@@ -81,6 +104,12 @@ class ShortsMaker:
         "Alignment=2,"
         "MarginV=80"
     )
+
+    # 효과 자동 순환 목록 (10종)
+    AUTO_EFFECTS = [
+        "zoom_center", "zoom_top", "pan_left", "zoom_out", "pan_right",
+        "zoom_bottom", "pan_up", "diagonal_zoom", "zoom_out_reveal", "pan_down",
+    ]
 
     @staticmethod
     async def get_audio_duration(audio_path: str) -> float:
@@ -121,10 +150,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for i, scene in enumerate(scenes):
             style = "Hook" if i == 0 else "Default"
             for line in scene.subtitle_lines:
-                line_duration = max(len(line) * 0.12, 1.5)  # 글자당 0.12초, 최소 1.5초
+                line_duration = max(len(line) * 0.12, 1.5)
                 start = ShortsMaker._format_ass_time(current_time)
                 end = ShortsMaker._format_ass_time(current_time + line_duration)
-                # 줄바꿈 처리
                 safe_line = line.replace("\n", "\\N")
                 ass_content += f"Dialogue: 0,{start},{end},{style},,0,0,0,,{safe_line}\n"
                 current_time += line_duration
@@ -147,15 +175,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     @staticmethod
     def split_narration_to_subtitle(narration: str, max_chars: int = 18) -> List[str]:
         """나레이션을 자막용 짧은 줄로 분할 (한국어 기준 18자)"""
-        # 문장 단위 분리
         sentences = re.split(r'(?<=[.!?。])\s*', narration.strip())
         lines = []
         for sent in sentences:
             if not sent.strip():
                 continue
-            # 긴 문장은 쪼개기
             while len(sent) > max_chars:
-                # 조사/접속사 기준 분할
                 cut = max_chars
                 for sep in [', ', '에 ', '은 ', '는 ', '을 ', '를 ', '이 ', '가 ', '의 ', '와 ', '과 ', ' ']:
                     idx = sent[:max_chars + 5].rfind(sep)
@@ -176,19 +201,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         output_path: str,
     ) -> bool:
         """이미지 1장 → Ken Burns 효과 적용 세로 클립 생성"""
-        frames = max(int(duration * FPS), FPS)  # 최소 1초 분량
+        frames = max(int(duration * FPS), FPS)
 
         effect_template = ShortsMaker.EFFECTS.get(effect, ShortsMaker.EFFECTS["zoom_center"])
         zoompan = effect_template["filter"].format(
             frames=frames, w=WIDTH, h=HEIGHT, fps=FPS
         )
 
-        # 핵심 수정: 이미지를 먼저 세로 비율(9:16)에 맞게 확대/크롭 후 zoompan 적용
-        # 1) scale: 가로 기준으로 넓게 스케일 (zoompan이 줌할 여유 확보)
-        # 2) pad: 세로가 부족하면 패딩
-        # 3) crop: 정확히 필요한 크기로 자르기
-        # 4) zoompan: Ken Burns 효과 (출력 크기 1080x1920)
-        # 5) fade: 인/아웃
         fade_out_start = max(duration - 0.3, 0.1)
         filter_complex = (
             f"[0:v]"
@@ -203,7 +222,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         cmd = [
             "ffmpeg", "-y",
             "-loop", "1",
-            "-t", str(duration + 1),  # 입력을 duration보다 약간 길게
+            "-t", str(duration + 1),
             "-i", image_path,
             "-filter_complex", filter_complex,
             "-map", "[out]",
@@ -224,7 +243,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if proc.returncode != 0:
                 err_text = stderr.decode()[-500:]
                 logger.error(f"[씬 클립 실패] {err_text}")
-                # 폴백: 간단한 스케일만 적용
                 return await ShortsMaker._create_simple_clip(image_path, duration, output_path)
             logger.info(f"[씬 클립] {output_path} ({duration:.1f}s, {effect})")
             return True
@@ -271,7 +289,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             logger.error(f"[폴백 에러] {e}")
             return False
 
-
     @staticmethod
     async def assemble_shorts(
         scene_clips: List[str],
@@ -303,7 +320,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         filters = []
 
         if bgm_path and os.path.exists(bgm_path):
-            # TTS + BGM 믹싱
             filters.append(f"[1:a]volume=1.0[tts];[2:a]volume={bgm_volume}[bgm];[tts][bgm]amix=inputs=2:duration=shortest[aout]")
             audio_map = "[aout]"
         else:
@@ -356,7 +372,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 logger.error(f"[숏츠 조립 실패] {error_msg}")
                 return {"success": False, "error": error_msg}
 
-            # 결과 확인
             file_size = os.path.getsize(output_path)
             duration = await ShortsMaker.get_audio_duration(output_path)
 
@@ -375,7 +390,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             logger.error(f"[숏츠 조립 에러] {e}")
             return {"success": False, "error": str(e)}
         finally:
-            # 임시 파일 정리
             if concat_file.exists():
                 concat_file.unlink()
 
@@ -387,8 +401,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         rate: str = "+10%",
         effects: Optional[List[str]] = None,
         output_name: str = "shorts_output.mp4",
+        use_ai_clips: bool = False,
+        ai_clip_model: Optional[str] = None,
+        ai_clip_duration: int = 4,
+        script_id: int = 0,
+        genre: str = "default",
+        image_prompts: Optional[List[str]] = None,
     ) -> dict:
-        """스크립트 → TTS → 자막 → Ken Burns → 숏츠 원스톱 제작"""
+        """
+        스크립트 → TTS → 자막 → Ken Burns 또는 AI 클립 → 숏츠 원스톱 제작
+
+        Parameters (신규)
+        ----------
+        use_ai_clips : bool
+            True면 VideoClipService로 AI 동영상 클립 생성, False면 기존 Ken Burns
+        ai_clip_model : str, optional
+            특정 AI 비디오 모델 지정 (wan, ltx-2, seedance 등)
+        ai_clip_duration : int
+            AI 클립 1개당 길이 (초)
+        script_id : int
+            스크립트 ID (AI 클립 폴더 관리용)
+        genre : str
+            장르 (모션 프롬프트용)
+        image_prompts : list[str], optional
+            이미지별 원본 프롬프트 (AI 클립 모션 힌트용)
+        """
         from app.services.tts_service import TTSService
 
         # 1. 나레이션 추출
@@ -396,7 +433,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not narration or len(narration.strip()) < 10:
             return {"success": False, "error": "나레이션 텍스트가 부족합니다"}
 
-        # 숏츠는 짧게 — 최대 300자로 제한
         if len(narration) > 300:
             sentences = re.split(r'(?<=[.!?。])\s*', narration)
             trimmed = ""
@@ -449,36 +485,97 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if effects and i < len(effects):
                 eff = effects[i]
             else:
-                # 자동 효과 순환
-                auto_effects = ["zoom_center", "zoom_top", "pan_left", "zoom_out", "pan_right"]
-                eff = auto_effects[i % len(auto_effects)]
+                eff = ShortsMaker.AUTO_EFFECTS[i % len(ShortsMaker.AUTO_EFFECTS)]
+
+            # 이미지 프롬프트 가져오기
+            img_prompt = ""
+            if image_prompts and i < len(image_prompts):
+                img_prompt = image_prompts[i]
 
             scenes.append(ShortsScene(
                 image_path=img,
                 narration="",
                 duration=per_image,
                 subtitle_lines=scene_lines,
-                effect=eff
+                effect=eff,
+                image_prompt=img_prompt,
             ))
 
         # 6. ASS 자막 파일 생성
         ass_path = str(SHORTS_DIR / f"{output_name.replace('.mp4', '')}.ass")
         ShortsMaker.generate_ass_subtitle(scenes, ass_path)
 
-        # 7. 씬별 Ken Burns 클립 생성
+        # 7. 씬별 클립 생성 — AI 클립 또는 Ken Burns
         clip_paths = []
-        for i, scene in enumerate(scenes):
-            clip_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
-            success = await ShortsMaker.create_scene_clip(
-                image_path=scene.image_path,
-                duration=scene.duration,
-                effect=scene.effect,
-                output_path=clip_path
-            )
-            if success:
-                clip_paths.append(clip_path)
-            else:
-                return {"success": False, "error": f"씬 {i} 클립 생성 실패"}
+
+        if use_ai_clips:
+            # ── AI 비디오 클립 모드 ──
+            logger.info(f"🎬 AI 비디오 클립 모드 활성화 (model={ai_clip_model})")
+            from app.services.video_clip_service import VideoClipService
+            clip_service = VideoClipService()
+
+            try:
+                for i, scene in enumerate(scenes):
+                    # AI 클립 생성
+                    from app.services.video_clip_service import VideoClipService as VCS
+                    motion_prompt = VCS.build_motion_prompt(
+                        scene.image_prompt or "cinematic scene",
+                        genre,
+                        i,
+                    )
+
+                    result = await clip_service.generate_clip(
+                        image_path=scene.image_path,
+                        prompt=motion_prompt,
+                        script_id=script_id,
+                        scene_id=f"scene_{i:02d}",
+                        genre=genre,
+                        fmt="shorts",
+                        duration=min(int(scene.duration) + 1, ai_clip_duration),
+                        model=ai_clip_model,
+                    )
+
+                    if result["success"]:
+                        clip_paths.append(result["path"])
+                        logger.info(
+                            f"  ✅ AI 클립 {i+1}/{num_images}: "
+                            f"{result['model']} | ${result.get('cost', 0):.3f}"
+                        )
+                    else:
+                        # AI 실패 → 해당 씬만 Ken Burns 폴백
+                        logger.warning(
+                            f"  ⚠️ AI 클립 {i+1} 실패 → Ken Burns 폴백"
+                        )
+                        kb_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
+                        success = await ShortsMaker.create_scene_clip(
+                            image_path=scene.image_path,
+                            duration=scene.duration,
+                            effect=scene.effect,
+                            output_path=kb_path,
+                        )
+                        if success:
+                            clip_paths.append(kb_path)
+                        else:
+                            return {
+                                "success": False,
+                                "error": f"씬 {i} AI+KB 모두 실패",
+                            }
+            finally:
+                await clip_service.close()
+        else:
+            # ── 기존 Ken Burns 모드 ──
+            for i, scene in enumerate(scenes):
+                clip_path = str(SHORTS_DIR / f"clip_{i:02d}.mp4")
+                success = await ShortsMaker.create_scene_clip(
+                    image_path=scene.image_path,
+                    duration=scene.duration,
+                    effect=scene.effect,
+                    output_path=clip_path,
+                )
+                if success:
+                    clip_paths.append(clip_path)
+                else:
+                    return {"success": False, "error": f"씬 {i} 클립 생성 실패"}
 
         # 8. 최종 조립
         output_path = str(SHORTS_DIR / output_name)
@@ -489,11 +586,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             output_path=output_path,
         )
 
-        # 9. 임시 클립 정리
-        for clip in clip_paths:
-            try:
-                os.remove(clip)
-            except Exception:
-                pass
+        # 9. 임시 클립 정리 (Ken Burns 클립만, AI 클립은 캐시 유지)
+        if not use_ai_clips:
+            for clip in clip_paths:
+                try:
+                    os.remove(clip)
+                except Exception:
+                    pass
 
         return result
