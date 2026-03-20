@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
-import xai_sdk
 import base64
 
 import httpx
@@ -193,7 +192,7 @@ class VideoClipService:
         *,
         image_path: Optional[str] = None,
         prompt: str = "",
-        script_id: int = 0,
+        script_id: int | str = 0,
         scene_id: str = "clip",
         genre: str = "default",
         fmt: str = "shorts",
