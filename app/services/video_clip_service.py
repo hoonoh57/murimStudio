@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+import xai_sdk
+import base64
 
 import httpx
 
@@ -36,6 +38,13 @@ VIDEO_BASE_URL = "https://gen.pollinations.ai/video"
 
 # 모델 설정
 VIDEO_MODELS = {
+    "grok-imagine": {
+        "name": "Grok Imagine Video (xAI)",
+        "cost_per_sec": 0.05,
+        "max_duration": 15,
+        "desc": "xAI 최상위 비디오 모델, 이미지→비디오+오디오, 720p",
+        "free": False,
+    },
     "wan": {
         "name": "Wan (Alibaba)",
         "cost_per_sec": 0.05,
@@ -74,7 +83,8 @@ VIDEO_MODELS = {
 }
 
 # 모델 폴백 순서
-MODEL_FALLBACK_ORDER = ["wan", "ltx-2", "seedance", "ken-burns"]
+MODEL_FALLBACK_ORDER = ["grok-imagine", "wan", "ltx-2", "seedance", "ken-burns"]
+
 
 # 요청 설정
 REQUEST_TIMEOUT = 120
@@ -263,6 +273,30 @@ class VideoClipService:
             max_dur = model_info.get("max_duration", 10)
             clip_duration = min(duration, max_dur)
 
+            # Grok Imagine은 별도 메서드
+            if model_name == "grok-imagine":
+                grok_ok = await self._try_grok_imagine(
+                    image_path=image_path or "",
+                    prompt=prompt,
+                    duration=clip_duration,
+                    aspect_ratio=aspect_ratio,
+                    filepath=filepath,
+                )
+                if grok_ok:
+                    elapsed = time.time() - start
+                    cost = clip_duration * 0.05
+                    logger.info(f"✅ 클립 생성: {scene_id} | grok-imagine | {clip_duration}s | ${cost:.3f} | {elapsed:.1f}s")
+                    self._clip_cache[cache_key] = str(filepath)
+                    return {
+                        "success": True, "path": str(filepath),
+                        "url": web_url, "model": "grok-imagine-video",
+                        "duration": clip_duration, "cost": cost,
+                        "elapsed": elapsed, "cached": False,
+                    }
+                last_error = "grok-imagine: 실패"
+                logger.warning("⚠️ grok-imagine 실패 → 다음 모델")
+                continue
+
             result = await self._try_api(
                 model=model_name,
                 prompt=prompt,
@@ -272,6 +306,7 @@ class VideoClipService:
             )
 
             if result["success"]:
+
                 elapsed = time.time() - start
                 cost = model_info.get("cost_per_sec", 0) * clip_duration
                 logger.info(
@@ -318,6 +353,126 @@ class VideoClipService:
         }
 
     # ── Pollinations API 호출 ─────────────────────────
+    async def _try_grok_imagine(
+        self,
+        image_path: str,
+        prompt: str,
+        duration: int,
+        aspect_ratio: str,
+        filepath: Path,
+    ) -> bool:
+        """Grok Imagine Video API — 이미지→비디오 변환"""
+        api_key = os.getenv("XAI_API_KEY", "")
+        if not api_key:
+            logger.warning("⚠️ XAI_API_KEY 미설정 → Grok Imagine 건너뜀")
+            return False
+
+        try:
+            import requests as sync_requests
+
+            # 이미지를 base64로 변환
+            img_path = Path(image_path)
+            if not img_path.exists():
+                logger.error(f"❌ 이미지 없음: {image_path}")
+                return False
+
+            suffix = img_path.suffix.lower()
+            mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
+            with open(img_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
+            image_url = f"data:{mime};base64,{img_b64}"
+
+            # Step 1: 생성 요청
+            logger.info(f"🎬 Grok Imagine 요청: duration={duration}s, aspect={aspect_ratio}")
+            resp = sync_requests.post(
+                "https://api.x.ai/v1/videos/generations",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-imagine-video",
+                    "prompt": prompt,
+                    "image_url": image_url,
+                    "duration": duration,
+                    "aspect_ratio": aspect_ratio,
+                    "resolution": "480p",
+                },
+                timeout=30,
+            )
+
+            if resp.status_code == 429:
+                logger.warning("⚠️ Grok Imagine 429: 크레딧 소진 또는 rate limit")
+                return False
+            if resp.status_code != 200:
+                logger.warning(f"⚠️ Grok Imagine {resp.status_code}: {resp.text[:200]}")
+                return False
+
+            data = resp.json()
+            request_id = data.get("request_id")
+            if not request_id:
+                logger.error("❌ Grok Imagine: request_id 없음")
+                return False
+
+            # Step 2: 폴링 (최대 5분)
+            import time
+            max_wait = 300
+            poll_interval = 5
+            elapsed = 0
+
+            while elapsed < max_wait:
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+                poll_resp = sync_requests.get(
+                    f"https://api.x.ai/v1/videos/{request_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=15,
+                )
+
+                if poll_resp.status_code != 200:
+                    logger.warning(f"⚠️ 폴링 에러: {poll_resp.status_code}")
+                    continue
+
+                poll_data = poll_resp.json()
+                status = poll_data.get("status", "")
+
+                if status == "done":
+                    video_url = poll_data.get("video", {}).get("url", "")
+                    if not video_url:
+                        logger.error("❌ Grok Imagine: 비디오 URL 없음")
+                        return False
+
+                    # 비디오 다운로드
+                    vid_resp = sync_requests.get(video_url, timeout=60)
+                    if vid_resp.status_code == 200 and len(vid_resp.content) > 10000:
+                        filepath.parent.mkdir(parents=True, exist_ok=True)
+                        filepath.write_bytes(vid_resp.content)
+                        logger.info(
+                            f"✅ Grok Imagine 성공: {filepath.name} "
+                            f"({len(vid_resp.content) / 1024:.0f}KB, {elapsed}s 소요)"
+                        )
+                        return True
+                    else:
+                        logger.error(f"❌ 비디오 다운로드 실패: {vid_resp.status_code}")
+                        return False
+
+                elif status == "failed":
+                    logger.error("❌ Grok Imagine 생성 실패")
+                    return False
+                elif status == "expired":
+                    logger.error("❌ Grok Imagine 요청 만료")
+                    return False
+                else:
+                    if elapsed % 15 == 0:
+                        logger.info(f"⏳ Grok Imagine 생성 중... ({elapsed}s)")
+
+            logger.error(f"❌ Grok Imagine 타임아웃 ({max_wait}s)")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ Grok Imagine 예외: {e}")
+            return False
 
     async def _try_api(
         self,
@@ -578,7 +733,7 @@ class VideoClipService:
     # ── 유틸리티 ──────────────────────────────────────────
     def get_clips_for_script(self, script_id: str) -> list[Path]:
         """특정 스크립트의 생성된 클립 목록 반환"""
-        script_dir = self.clip_dir / f"script_{script_id}"
+        script_dir = CLIP_DIR / f"script_{script_id}"
         if not script_dir.exists():
             return []
         clips = sorted(script_dir.glob("*.mp4"))
@@ -588,15 +743,16 @@ class VideoClipService:
         """캐시 클리어 — script_id 지정 시 해당 폴더만, 없으면 전체"""
         import shutil
         if script_id:
-            target = self.clip_dir / f"script_{script_id}"
+            target = CLIP_DIR / f"script_{script_id}"
             if target.exists():
                 shutil.rmtree(target)
                 logger.info(f"🗑️ 캐시 삭제: {target}")
         else:
-            if self.clip_dir.exists():
-                shutil.rmtree(self.clip_dir)
-                self.clip_dir.mkdir(parents=True, exist_ok=True)
+            if CLIP_DIR.exists():
+                shutil.rmtree(CLIP_DIR)
+                CLIP_DIR.mkdir(parents=True, exist_ok=True)
                 logger.info("🗑️ 전체 클립 캐시 삭제")
+
 
     @staticmethod
     def get_model_list() -> list[dict]:
@@ -612,20 +768,3 @@ class VideoClipService:
                 "free": info.get("free", False),
             })
         return models
-
-    @staticmethod
-    def build_motion_prompt(
-        base_prompt: str,
-        genre: str = "default",
-        scene_index: int = 0,
-    ) -> str:
-        preset = MOTION_PRESETS.get(genre, MOTION_PRESETS.get("default", []))
-        if isinstance(preset, list):
-            motions = preset
-        elif isinstance(preset, dict):
-            motions = preset.get("motions", ["slow zoom in"])
-        else:
-            motions = ["slow zoom in"]
-        motion = motions[scene_index % len(motions)] if motions else "slow zoom in"
-        return f"{base_prompt}, {motion}, cinematic, smooth motion"
-
