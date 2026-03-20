@@ -353,43 +353,45 @@ class VideoClipService:
         }
 
     # ── Pollinations API 호출 ─────────────────────────
-    async def _try_grok_imagine(
-        self,
-        image_path: str,
-        prompt: str,
-        duration: int,
-        aspect_ratio: str,
-        filepath: Path,
-    ) -> bool:
-        """Grok Imagine Video API — 이미지→비디오 변환"""
-        api_key = os.getenv("XAI_API_KEY", "")
-        if not api_key:
-            logger.warning("⚠️ XAI_API_KEY 미설정 → Grok Imagine 건너뜀")
+async def _try_grok_imagine(
+    self,
+    image_path: str,
+    prompt: str,
+    duration: int,
+    aspect_ratio: str,
+    filepath: Path,
+) -> bool:
+    """Grok Imagine Video API — 이미지→비디오 (완전 비동기)"""
+    api_key = os.getenv("XAI_API_KEY", "")
+    if not api_key:
+        logger.warning("⚠️ XAI_API_KEY 미설정 → Grok Imagine 건너뜀")
+        return False
+
+    try:
+        # 이미지 base64 변환
+        img_path = Path(image_path)
+        if not img_path.exists():
+            logger.error(f"❌ 이미지 없음: {image_path}")
             return False
 
-        try:
-            import requests as sync_requests
+        suffix = img_path.suffix.lower()
+        mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
+        img_bytes = img_path.read_bytes()
+        img_b64 = base64.b64encode(img_bytes).decode()
+        image_url = f"data:{mime};base64,{img_b64}"
 
-            # 이미지를 base64로 변환
-            img_path = Path(image_path)
-            if not img_path.exists():
-                logger.error(f"❌ 이미지 없음: {image_path}")
-                return False
+        # httpx 비동기 클라이언트 사용
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
-            suffix = img_path.suffix.lower()
-            mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
-            with open(img_path, "rb") as f:
-                img_b64 = base64.b64encode(f.read()).decode()
-            image_url = f"data:{mime};base64,{img_b64}"
-
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
             # Step 1: 생성 요청
             logger.info(f"🎬 Grok Imagine 요청: duration={duration}s, aspect={aspect_ratio}")
-            resp = sync_requests.post(
+            resp = await client.post(
                 "https://api.x.ai/v1/videos/generations",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json={
                     "model": "grok-imagine-video",
                     "prompt": prompt,
@@ -398,7 +400,6 @@ class VideoClipService:
                     "aspect_ratio": aspect_ratio,
                     "resolution": "480p",
                 },
-                timeout=30,
             )
 
             if resp.status_code == 429:
@@ -414,37 +415,49 @@ class VideoClipService:
                 logger.error("❌ Grok Imagine: request_id 없음")
                 return False
 
-            # Step 2: 폴링 (최대 5분)
-            import time
-            max_wait = 300
-            poll_interval = 5
-            elapsed = 0
+        # Step 2: 폴링 (비동기, 최대 5분)
+        max_wait = 300
+        poll_interval = 5
+        elapsed = 0
 
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as poll_client:
             while elapsed < max_wait:
-                time.sleep(poll_interval)
+                await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
 
-                poll_resp = sync_requests.get(
-                    f"https://api.x.ai/v1/videos/{request_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=15,
-                )
+                try:
+                    poll_resp = await poll_client.get(
+                        f"https://api.x.ai/v1/videos/{request_id}",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                except httpx.HTTPError as e:
+                    logger.warning(f"⚠️ 폴링 에러: {e}")
+                    continue
 
                 if poll_resp.status_code != 200:
-                    logger.warning(f"⚠️ 폴링 에러: {poll_resp.status_code}")
+                    logger.warning(f"⚠️ 폴링 HTTP {poll_resp.status_code}")
                     continue
 
                 poll_data = poll_resp.json()
                 status = poll_data.get("status", "")
 
                 if status == "done":
-                    video_url = poll_data.get("video", {}).get("url", "")
+                    # video URL 추출 — 응답 구조에 따라 유연하게
+                    video_url = ""
+                    vid_obj = poll_data.get("video", {})
+                    if isinstance(vid_obj, dict):
+                        video_url = vid_obj.get("url", "")
                     if not video_url:
-                        logger.error("❌ Grok Imagine: 비디오 URL 없음")
+                        video_url = poll_data.get("url", "")
+
+                    if not video_url:
+                        logger.error(f"❌ Grok Imagine: 비디오 URL 없음. 응답: {str(poll_data)[:300]}")
                         return False
 
-                    # 비디오 다운로드
-                    vid_resp = sync_requests.get(video_url, timeout=60)
+                    # 비디오 다운로드 (별도 타임아웃)
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as dl_client:
+                        vid_resp = await dl_client.get(video_url)
+
                     if vid_resp.status_code == 200 and len(vid_resp.content) > 10000:
                         filepath.parent.mkdir(parents=True, exist_ok=True)
                         filepath.write_bytes(vid_resp.content)
@@ -454,25 +467,25 @@ class VideoClipService:
                         )
                         return True
                     else:
-                        logger.error(f"❌ 비디오 다운로드 실패: {vid_resp.status_code}")
+                        logger.error(f"❌ 비디오 다운로드 실패: {vid_resp.status_code}, size={len(vid_resp.content)}")
                         return False
 
                 elif status == "failed":
-                    logger.error("❌ Grok Imagine 생성 실패")
+                    logger.error(f"❌ Grok Imagine 생성 실패: {poll_data}")
                     return False
                 elif status == "expired":
                     logger.error("❌ Grok Imagine 요청 만료")
                     return False
                 else:
                     if elapsed % 15 == 0:
-                        logger.info(f"⏳ Grok Imagine 생성 중... ({elapsed}s)")
+                        logger.info(f"⏳ Grok Imagine 생성 중... ({elapsed}s, status={status})")
 
-            logger.error(f"❌ Grok Imagine 타임아웃 ({max_wait}s)")
-            return False
+        logger.error(f"❌ Grok Imagine 타임아웃 ({max_wait}s)")
+        return False
 
-        except Exception as e:
-            logger.error(f"❌ Grok Imagine 예외: {e}")
-            return False
+    except Exception as e:
+        logger.error(f"❌ Grok Imagine 예외: {e}")
+        return False
 
     async def _try_api(
         self,
